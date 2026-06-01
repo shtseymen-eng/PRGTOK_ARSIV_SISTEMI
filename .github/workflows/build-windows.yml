@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Windows EXE dosyası oluşturun
 
 on:
   push:
@@ -25,9 +25,7 @@ jobs:
 
       - name: EXE oluştur
         run: |
-          pyinstaller --onefile --windowed ^
-          --add-data "assets;assets" ^
-          main.py
+          pyinstaller --onefile --windowed --add-data "assets;assets" main.py
 
       - name: EXE yükle
         uses: actions/upload-artifact@v4

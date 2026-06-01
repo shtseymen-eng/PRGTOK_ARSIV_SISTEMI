@@ -1,0 +1,36 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Repo indir
+        uses: actions/checkout@v4
+
+      - name: Python kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Paketleri yükle
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: EXE oluştur
+        run: |
+          pyinstaller --onefile --windowed ^
+          --add-data "assets;assets" ^
+          main.py
+
+      - name: EXE yükle
+        uses: actions/upload-artifact@v4
+        with:
+          name: PRGTOK_EXE
+          path: dist/*.exe

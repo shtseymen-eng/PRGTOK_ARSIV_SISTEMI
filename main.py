@@ -5,7 +5,7 @@ from tkinter import filedialog, ttk, messagebox
 import customtkinter as ctk
 from PIL import Image
 
-from motor import klasor_tara, arama_yap, ozet_sayilar
+from motor import klasor_tara, arama_yap, ozet_sayilar, zorla_yeniden_oku
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -109,6 +109,15 @@ class PRGTOKApp(ctk.CTk):
             command=self.ozet_yenile
         ).grid(row=13, column=0, padx=16, pady=5, sticky="ew")
 
+        ctk.CTkButton(
+            self.sidebar,
+            text="♻️  Zorla Yeniden Oku",
+            height=46,
+            fg_color="#6B2F00",
+            hover_color="#8B3D00",
+            command=self.zorla_oku
+        ).grid(row=14, column=0, padx=16, pady=5, sticky="ew")
+
         self.signature = ctk.CTkFrame(self.sidebar, fg_color="#06111D")
         self.signature.grid(row=21, column=0, padx=12, pady=16, sticky="sew")
 
@@ -194,17 +203,20 @@ class PRGTOKApp(ctk.CTk):
         self.cat_frame.grid(row=3, column=0, padx=18, pady=8, sticky="ew")
 
         for i in range(4):
-            self.cat_frame.grid_columnconfigure(i, weight=1)
+            self.cat_frame.grid_columnconfigure(i, weight=1)  # 13 kategori, 4 sütun (4 satır)
 
         categories = [
             "TANK_BASINC_RAPORU",
             "ISOPA",
-            "T9_MUAYENE_SERTIFIKASI",
+            "T9_GECICI",
+            "T9_MUAYENE",
+            "T9_ANA",
             "TRAFIK_SIGORTASI",
             "TEHLIKELI_MADDE_SIGORTASI",
             "FENNI_MUAYENE",
             "SIZDIRMAZLIK",
             "YUKSEKTE_CALISABILIR_SAGLIK_RAPORU",
+            "SRC5",
             "YABANCI_PLAKA",
             "DIGER_BELGELER",
             "OKUNAMAYANLAR",
@@ -280,14 +292,21 @@ class PRGTOKApp(ctk.CTk):
             "Kapasite",
             "Tank Kodu",
             "Yeni Klasör",
+            "Tam Yol",
             "İşlem Durumu",
         ]
+
+        col_widths = {
+            "Yeni Dosya Adı": 220,
+            "Tam Yol": 340,
+            "Yeni Klasör": 160,
+        }
 
         self.tree = ttk.Treeview(self.table_frame, columns=columns, show="headings")
 
         for col in columns:
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=135, anchor="w")
+            self.tree.column(col, width=col_widths.get(col, 130), anchor="w")
 
         self.tree.grid(row=1, column=0, padx=12, pady=(0, 12), sticky="nsew")
 
@@ -375,10 +394,30 @@ class PRGTOKApp(ctk.CTk):
         for key, lbl in self.cat_labels.items():
             lbl.configure(text=str(ozet.get(key, 0)))
 
+    def zorla_oku(self):
+        yol = self.ana_klasor.get()
+        if not os.path.isdir(yol):
+            messagebox.showwarning("Klasör seç", "Önce ana klasörü seç.")
+            return
+        self.status.configure(text="● Zorla okuma başladı...")
+        self.update_idletasks()
+        try:
+            df = zorla_yeniden_oku(
+                yol,
+                log_callback=lambda msg: self.status.configure(text="● " + str(msg)[:120])
+            )
+            self.status.configure(text=f"● Zorla okuma tamamlandı. İşlenen: {len(df)} dosya")
+            self.ozet_yenile()
+            if df is not None and not df.empty:
+                self.tablo_doldur(df)
+        except Exception as e:
+            messagebox.showerror("Hata", str(e))
+            self.status.configure(text="● Hata oluştu")
+
     def rapor_bilgi(self):
         messagebox.showinfo(
             "Raporlar",
-            "Raporlar PREGATE_ARSIV / ISLEM_RAPORLARI klasöründe oluşur."
+            "Raporlar seçili klasör / ISLEM_RAPORLARI klasöründe oluşur."
         )
 
     def ayarlar_bilgi(self):

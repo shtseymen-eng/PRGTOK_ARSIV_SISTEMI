@@ -1,0 +1,28 @@
+# PyInstaller çıktıları
+dist/
+build/work/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Arşiv çıktıları (tarama sonuçları)
+PREGATE_ARSIV/
+OKUNAMAYANLAR/
+FARKLI_FORMAT_DOSYALAR/
+ISLEM_RAPORLARI/
+
+# VS Code
+.vscode/
+
+# Geçici dosyalar
+~$*
+*.tmp
+*.log
+
+# Ortam
+.env
+venv/
+.venv/

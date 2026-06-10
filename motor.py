@@ -792,10 +792,40 @@ def dosya_isle(dosya_yolu, ana_klasor):
         return sonuc
 
 
+def _eski_konumlari_tasi(ana_klasor):
+    """Eski PREGATE_ARSIV/OKUNAMAYANLAR ve PREGATE_ARSIV/FARKLI_FORMAT_DOSYALAR
+    içindeki dosyaları yeni dış konumlarına taşır (tek seferlik geçiş)."""
+    ana   = Path(ana_klasor)
+    arsiv = ana / "PREGATE_ARSIV"
+    gecis = {
+        "OKUNAMAYANLAR":       ana / "OKUNAMAYANLAR",
+        "FARKLI_FORMAT_DOSYALAR": ana / "FARKLI_FORMAT_DOSYALAR",
+    }
+    for klasor_adi, yeni_konum in gecis.items():
+        eski_konum = arsiv / klasor_adi
+        if not eski_konum.exists():
+            continue
+        yeni_konum.mkdir(exist_ok=True)
+        for dosya in list(eski_konum.iterdir()):
+            if dosya.is_file():
+                dosya_tasi(dosya, yeni_konum, dosya.name)
+        # Eski klasör boşaldıysa sil
+        try:
+            eski_konum.rmdir()
+        except OSError:
+            pass  # İçinde hâlâ dosya varsa bırak
+
+
 def klasor_tara(ana_klasor, log_callback=None):
     arsiv = klasorleri_hazirla(ana_klasor)
     sonuclar = []
     ana = Path(ana_klasor)
+
+    # Eski PREGATE_ARSIV içindeki OKUNAMAYANLAR/FARKLI_FORMAT dosyalarını dışarı taşı
+    _eski_konumlari_tasi(ana_klasor)
+    if log_callback:
+        log_callback("Eski klasor yapisi guncellendi")
+
     # PREGATE_ARSIV dışındaki özel klasörler – tarama sırasında atlanır,
     # "Zorla Yeniden Oku" ile ayrıca işlenir.
     ATLA_KLASORLER = {"OKUNAMAYANLAR", "FARKLI_FORMAT_DOSYALAR", "ISLEM_RAPORLARI"}
@@ -879,6 +909,9 @@ def zorla_yeniden_oku(ana_klasor, log_callback=None):
     ana   = Path(ana_klasor)
     arsiv = klasorleri_hazirla(ana_klasor)
     sonuclar = []
+
+    # Eski yapıdan kalan iç klasörleri de dahil et
+    _eski_konumlari_tasi(ana_klasor)
 
     hedef_klasorler = [
         ana / "OKUNAMAYANLAR",

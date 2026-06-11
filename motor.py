@@ -2,6 +2,8 @@
 import os
 import re
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -16,20 +18,24 @@ try:
 except ImportError:
     _PYTESSERACT_OK = False
 
-ISLEM_KODU = "PRGTOK"
-ELLE_DUZELT_KODU = "PRGT"    # Elle düzeltilmiş: isim değiştirme, sadece doğru klasöre taşı
-                              # Kullanım: dosya adının SONUNA boşluk + PRGT ekle (PRGTOK değil)
-                              # Örn: "Belge T9 ANA PRGT.pdf" → T9_ANA klasörüne taşınır
+ISLEM_KODU = "S"             # Program tarafından otomatik tarandı/sınıflandırıldı işareti
+ELLE_DUZELT_KODU = "E"       # Elle düzeltildi işareti: isim değişmez (kod hariç), sadece doğru klasöre taşınır
+                              # Kullanım: dosya adının SONUNA boşluk + E ekle
+                              # Örn: "Belge T9 ANA E.pdf" → T9 klasörüne taşınır
+
+# Eski (geriye dönük uyumluluk) kodlar – yeni taramada S / E koduna çevrilir
+ESKI_ISLEM_KODU = "PRGTOK"
+ESKI_ELLE_DUZELT_KODU = "PRGT"
 
 BELGE_KLASORLERI = {
     "TANK_BASINC_RAPORU": "TANK_BASINC_RAPORU",
     "ISOPA": "ISOPA",
-    # T9 alt grupları
-    "T9_GECICI": "T9_GECICI",
-    "T9_MUAYENE": "T9_MUAYENE",
-    "T9_ANA": "T9_ANA",
-    # Eski T9 klasörü – yeniden taramada yeni alt gruplara taşınır
-    "T9_MUAYENE_SERTIFIKASI": "T9_MUAYENE_SERTIFIKASI",
+    # T9 alt grupları – hepsi TEK fiziksel klasörde birleşir: "T9"
+    "T9_GECICI": "T9",
+    "T9_MUAYENE": "T9",
+    "T9_ANA": "T9",
+    # Eski T9 klasörü – aynı birleşik T9 klasörüne gider
+    "T9_MUAYENE_SERTIFIKASI": "T9",
     "TRAFIK_SIGORTASI": "TRAFIK_SIGORTASI",
     "TEHLIKELI_MADDE_SIGORTASI": "TEHLIKELI_MADDE_SIGORTASI",
     "FENNI_MUAYENE": "FENNI_MUAYENE",
@@ -206,10 +212,13 @@ def klasorleri_hazirla(ana_klasor):
     return arsiv
 
 
-def pdf_text_oku(dosya_yolu):
+def pdf_text_oku(dosya_yolu, max_sayfa=None):
+    """PDF'ten metin çıkarır. max_sayfa verilirse sadece ilk N sayfa okunur
+    (performans için) — hız kazandırır, büyük PDF'lerde tüm sayfaları okumaz."""
     metin = ""
     with pdfplumber.open(dosya_yolu) as pdf:
-        for sayfa in pdf.pages:
+        sayfalar = pdf.pages if max_sayfa is None else pdf.pages[:max_sayfa]
+        for sayfa in sayfalar:
             metin += "\n" + (sayfa.extract_text() or "")
     return metin.strip()
 
@@ -222,6 +231,12 @@ def resim_text_oku(dosya_yolu):
         return ""
     try:
         img = _PILImage.open(dosya_yolu)
+        # Çok büyük görselleri küçült (OCR hızını ciddi şekilde artırır)
+        MAX_BOYUT = 2200
+        if max(img.size) > MAX_BOYUT:
+            oran = MAX_BOYUT / max(img.size)
+            yeni_boyut = (max(1, int(img.size[0] * oran)), max(1, int(img.size[1] * oran)))
+            img = img.resize(yeni_boyut, _PILImage.LANCZOS)
         # Türkçe+İngilizce; dil paketi yoksa sadece İngilizce dene
         try:
             return pytesseract.image_to_string(img, lang="tur+eng", config="--psm 6").strip()
@@ -465,11 +480,44 @@ def belge_turu_bul(metin, dosya_adi=""):
 
 
 
+def _son_token(dosya_adi):
+    """Dosya adının (uzantısız) son boşlukla ayrılmış parçasını büyük harfle döndürür.
+    İşlem kodu tespiti SADECE bu son parçaya bakılarak yapılır; bu sayede
+    tek harfli kodlar (S / E) dosya adı içinde başka yerlerde geçse bile
+    yanlış pozitif (false positive) oluşmaz."""
+    stem = Path(dosya_adi).stem.strip()
+    if not stem:
+        return ""
+    parcalar = stem.replace("-", " ").split(" ")
+    return parcalar[-1].upper().strip() if parcalar else ""
+
+
+def _islenmis_mi(dosya_adi):
+    """Dosya program tarafından otomatik tarandı mı? (yeni kod 'S' veya eski 'PRGTOK')"""
+    son = _son_token(dosya_adi)
+    return son in (ISLEM_KODU, ESKI_ISLEM_KODU)
+
+
 def _is_prgt_dosya(dosya_adi):
-    """Dosya adının sonunda ' PRGT' var mı? (PRGTOK değil)
-    Kullanım: elle düzeltilmiş belgeler için — sadece klasöre taşınır, adı değişmez."""
-    stem = Path(dosya_adi).stem.upper().strip()
-    return (stem.endswith(" PRGT") or stem.endswith("-PRGT")) and "PRGTOK" not in stem
+    """Dosya elle düzeltme kodu ile mi işaretli? (yeni kod 'E' veya eski 'PRGT')
+    Kullanım: elle düzeltilmiş belgeler için — sadece doğru klasöre taşınır,
+    kodu yeni taramada 'E' olarak güncellenir."""
+    son = _son_token(dosya_adi)
+    return son in (ELLE_DUZELT_KODU, ESKI_ELLE_DUZELT_KODU)
+
+
+def _kod_degistir(dosya_adi, yeni_kod):
+    """Dosya adının sonundaki işlem kodunu (S/PRGTOK/E/PRGT) yeni_kod ile değiştirir.
+    Son parça bilinen bir kod değilse, yeni_kod sona eklenir."""
+    p = Path(dosya_adi)
+    stem = p.stem.strip()
+    bilinen_kodlar = (ISLEM_KODU, ELLE_DUZELT_KODU, ESKI_ISLEM_KODU, ESKI_ELLE_DUZELT_KODU)
+    parcalar = stem.split(" ")
+    if parcalar and parcalar[-1].upper() in bilinen_kodlar:
+        parcalar[-1] = yeni_kod
+    else:
+        parcalar.append(yeni_kod)
+    return " ".join(x for x in parcalar if x) + p.suffix
 
 
 def belge_turu_dosya_adindan(dosya_adi):
@@ -490,7 +538,7 @@ def belge_turu_dosya_adindan(dosya_adi):
         if display_norm and len(display_norm) >= 2 and display_norm in ad:
             return tur
 
-    if ISLEM_KODU in ad and YABANCI_PLAKA_ADAY_RE.search(ad) and not TURK_PLAKA_RE.search(ad):
+    if _islenmis_mi(dosya_adi) and YABANCI_PLAKA_ADAY_RE.search(ad) and not TURK_PLAKA_RE.search(ad):
         return "YABANCI_PLAKA"
     return ""
 
@@ -507,13 +555,25 @@ def benzersiz_yol(hedef_yol):
         i += 1
 
 
+_TASIMA_KILIDI = threading.Lock()
+
+
 def dosya_tasi(kaynak, hedef_klasor, yeni_ad=None):
-    hedef_klasor.mkdir(parents=True, exist_ok=True)
-    hedef = benzersiz_yol(hedef_klasor / (yeni_ad if yeni_ad else kaynak.name))
-    if kaynak.resolve() == hedef.resolve():
+    """Dosyayı hedef klasöre taşır. Paralel tarama sırasında aynı klasöre
+    aynı anda yazma/isim çakışması olmaması için kilit kullanılır.
+
+    NOT: Hedef yol zaten kaynağın kendisiyse (dosya zaten doğru yerde ve
+    doğru isimde) hiçbir şey yapılmaz — benzersiz_yol() bu durumda dosyanın
+    kendisini "doluyor" sanıp gereksiz "_1" son eki eklemesin diye bu kontrol
+    benzersiz_yol'dan ÖNCE yapılır."""
+    with _TASIMA_KILIDI:
+        hedef_klasor.mkdir(parents=True, exist_ok=True)
+        hedef_aday = hedef_klasor / (yeni_ad if yeni_ad else kaynak.name)
+        if kaynak.resolve() == hedef_aday.resolve():
+            return hedef_aday
+        hedef = benzersiz_yol(hedef_aday)
+        shutil.move(str(kaynak), str(hedef))
         return hedef
-    shutil.move(str(kaynak), str(hedef))
-    return hedef
 
 
 def _fp(text, max_len=0):
@@ -604,7 +664,7 @@ def bilgi_cek(metin, dosya_adi=""):
 
 def hatali_isopa_prgtok_mu(dosya_adi):
     ad = dosya_adi.upper().replace(" ", "_")
-    return ISLEM_KODU in ad and "_ISOPA_" in ad and (
+    return _islenmis_mi(dosya_adi) and "_ISOPA_" in ad and (
         ad.startswith("ON_") or ad.startswith("DELIVERED_") or ad.startswith("BILGIYOK_") or ad.startswith("CERTIFICATE_")
     )
 
@@ -630,7 +690,7 @@ def dosya_isle(dosya_yolu, ana_klasor):
             sonuc["İşlem Durumu"] = "RAPOR_ATLANDI"
             return sonuc
 
-        # ── PRGT: Elle düzeltilmiş → isim değiştirme, sadece doğru klasöre at ──
+        # ── E (elle düzeltilmiş) / eski PRGT: isim değişmez (kod hariç), sadece doğru klasöre at ──
         if _is_prgt_dosya(kaynak.name):
             # İçeriği oku → türü belirle (dosya adı fallback)
             tur = ""
@@ -650,8 +710,10 @@ def dosya_isle(dosya_yolu, ana_klasor):
                 tur = belge_turu_dosya_adindan(kaynak.name) or "DIGER_BELGELER"
             hedef_klasor = arsiv / BELGE_KLASORLERI.get(tur, "DIGER_BELGELER")
             sonuc["Belge Türü"] = tur
-            if kaynak.parent.resolve() != hedef_klasor.resolve():
-                yeni_yol = dosya_tasi(kaynak, hedef_klasor, kaynak.name)
+            # Eski " PRGT" kodunu yeni "E" koduna çevir
+            yeni_ad = kaynak.name if _son_token(kaynak.name) == ELLE_DUZELT_KODU else _kod_degistir(kaynak.name, ELLE_DUZELT_KODU)
+            if kaynak.parent.resolve() != hedef_klasor.resolve() or yeni_ad != kaynak.name:
+                yeni_yol = dosya_tasi(kaynak, hedef_klasor, yeni_ad)
                 sonuc["Yeni Dosya Adı"] = yeni_yol.name
                 sonuc["Yeni Klasör"] = str(yeni_yol.parent)
                 sonuc["İşlem Durumu"] = "ELLEDUZ_TASINDI"
@@ -661,8 +723,8 @@ def dosya_isle(dosya_yolu, ana_klasor):
                 sonuc["İşlem Durumu"] = "ELLEDUZ_DOGRU_YERDE"
             return sonuc
 
-        # ── PRGTOK: Daha önce işlenmiş dosyalar ─────────────────────────────────
-        if ISLEM_KODU in kaynak.name.upper() and not hatali_isopa_prgtok_mu(kaynak.name):
+        # ── S (otomatik tarandı) / eski PRGTOK: Daha önce işlenmiş dosyalar ─────
+        if _islenmis_mi(kaynak.name) and not hatali_isopa_prgtok_mu(kaynak.name):
             tur = belge_turu_dosya_adindan(kaynak.name)
 
             # OKUNAMAYANLAR → yeniden okuma dene
@@ -711,8 +773,10 @@ def dosya_isle(dosya_yolu, ana_klasor):
 
             hedef_klasor = arsiv / BELGE_KLASORLERI.get(tur, "DIGER_BELGELER")
             sonuc["Belge Türü"] = tur
-            if kaynak.parent.resolve() != hedef_klasor.resolve():
-                yeni_yol = dosya_tasi(kaynak, hedef_klasor)
+            # Eski "PRGTOK" kodunu yeni "S" koduna çevir
+            yeni_ad = kaynak.name if _son_token(kaynak.name) == ISLEM_KODU else _kod_degistir(kaynak.name, ISLEM_KODU)
+            if kaynak.parent.resolve() != hedef_klasor.resolve() or yeni_ad != kaynak.name:
+                yeni_yol = dosya_tasi(kaynak, hedef_klasor, yeni_ad)
                 sonuc["Yeni Dosya Adı"] = yeni_yol.name
                 sonuc["Yeni Klasör"] = str(yeni_yol.parent)
                 sonuc["İşlem Durumu"] = "YER_DUZELTILDI_PRGTOK"
@@ -748,12 +812,24 @@ def dosya_isle(dosya_yolu, ana_klasor):
                     })
                     return sonuc
             else:
-                metin = pdf_text_oku(str(kaynak))
+                # Performans: önce ilk birkaç sayfa okunur; yetersizse tüm PDF okunur
+                metin = pdf_text_oku(str(kaynak), max_sayfa=6)
         except Exception as e:
             metin = ""
             sonuc["Hata"] = f"OKUMA_HATASI: {e}"
 
         tur = belge_turu_bul(metin, eski_ad)
+
+        # İlk sayfalarda yeterli bilgi bulunamadıysa PDF'in tamamını oku
+        if uzanti in PDF_EXT and tur == "DIGER_BELGELER" and not yabanci_plaka_bul(metin):
+            try:
+                metin_tam = pdf_text_oku(str(kaynak))
+                if len(metin_tam) > len(metin):
+                    metin = metin_tam
+                    tur = belge_turu_bul(metin, eski_ad)
+            except Exception:
+                pass
+
         bilgi = bilgi_cek(metin, eski_ad)
 
         # Metin okunamadıysa → orijinal adıyla OKUNAMAYANLAR klasörüne at (prefix yok)
@@ -816,6 +892,20 @@ def _eski_konumlari_tasi(ana_klasor):
             pass  # İçinde hâlâ dosya varsa bırak
 
 
+def _eski_t9_klasorlerini_temizle(ana_klasor):
+    """T9_GECICI / T9_MUAYENE / T9_ANA / T9_MUAYENE_SERTIFIKASI artık 'T9'
+    klasörüyle birleştiği için, içi boşaldıysa eski klasörleri siler."""
+    arsiv = Path(ana_klasor) / "PREGATE_ARSIV"
+    for eski_ad in ("T9_GECICI", "T9_MUAYENE", "T9_ANA", "T9_MUAYENE_SERTIFIKASI"):
+        eski_klasor = arsiv / eski_ad
+        if eski_klasor.exists() and eski_klasor.is_dir():
+            try:
+                if not any(eski_klasor.iterdir()):
+                    eski_klasor.rmdir()
+            except OSError:
+                pass
+
+
 def klasor_tara(ana_klasor, log_callback=None):
     arsiv = klasorleri_hazirla(ana_klasor)
     sonuclar = []
@@ -830,6 +920,7 @@ def klasor_tara(ana_klasor, log_callback=None):
     # "Zorla Yeniden Oku" ile ayrıca işlenir.
     ATLA_KLASORLER = {"OKUNAMAYANLAR", "FARKLI_FORMAT_DOSYALAR", "ISLEM_RAPORLARI"}
 
+    dosya_listesi = []
     for root, dirs, files in os.walk(ana):
         root_path = Path(root)
         # Bu klasörleri alt klasörlerle birlikte atla
@@ -841,12 +932,26 @@ def klasor_tara(ana_klasor, log_callback=None):
             yol = root_path / file
             if yol.name.startswith("~$"):
                 continue
+            dosya_listesi.append(yol)
 
+    # Performans: birden fazla dosya varsa paralel işle (OCR/PDF okuma I/O ağırlıklı)
+    if len(dosya_listesi) > 1:
+        max_worker = min(4, max(1, os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=max_worker) as ex:
+            future_map = {ex.submit(dosya_isle, str(yol), ana_klasor): yol for yol in dosya_listesi}
+            for fut in as_completed(future_map):
+                sonuc = fut.result()
+                sonuclar.append(sonuc)
+                if log_callback:
+                    log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
+    else:
+        for yol in dosya_listesi:
             sonuc = dosya_isle(str(yol), ana_klasor)
             sonuclar.append(sonuc)
-
             if log_callback:
                 log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
+
+    _eski_t9_klasorlerini_temizle(ana_klasor)
 
     df = pd.DataFrame(sonuclar)
     rapor_klasor = ana / "ISLEM_RAPORLARI"
@@ -889,16 +994,21 @@ def ozet_sayilar(ana_klasor):
     arsiv = ana / "PREGATE_ARSIV"
     sonuc = {}
 
+    # Birden fazla "tur" aynı fiziksel klasöre (ör. T9_GECICI/T9_MUAYENE/T9_ANA → "T9")
+    # işaret edebilir; toplamda mükerrer sayım yapmamak için klasör bazında say.
+    klasor_sayilari = {}
     for tur, klasor in BELGE_KLASORLERI.items():
-        p = arsiv / klasor
-        sonuc[tur] = len([x for x in p.glob("*.*") if x.is_file()]) if p.exists() else 0
+        if klasor not in klasor_sayilari:
+            p = arsiv / klasor
+            klasor_sayilari[klasor] = len([x for x in p.glob("*.*") if x.is_file()]) if p.exists() else 0
+        sonuc[tur] = klasor_sayilari[klasor]
 
     # PREGATE_ARSIV dışındaki klasörler
     for d in ("OKUNAMAYANLAR", "FARKLI_FORMAT_DOSYALAR"):
         p = ana / d
         sonuc[d] = len([x for x in p.glob("*.*") if x.is_file()]) if p.exists() else 0
 
-    sonuc["TOPLAM"] = sum(sonuc.values())
+    sonuc["TOPLAM"] = sum(klasor_sayilari.values()) + sonuc["OKUNAMAYANLAR"] + sonuc["FARKLI_FORMAT_DOSYALAR"]
     return sonuc
 
 
@@ -1003,3 +1113,193 @@ def zorla_yeniden_oku(ana_klasor, log_callback=None):
         df.to_excel(rapor_klasor / f"ZORLA_OKUMA_RAPORU_{ts}.xlsx", index=False)
         return df
     return pd.DataFrame()
+
+
+def _yeniden_oku_ve_isimlendir(kaynak, arsiv, eski_ad, uzanti):
+    """İçeriği baştan okuyup sınıflandırarak yeni 'S' kodlu adla doğru
+    (birleşik T9 dahil) klasöre taşır. Okunamazsa OKUNAMAYANLAR'a, desteklenmeyen
+    formatsa FARKLI_FORMAT_DOSYALAR'a taşır. Sonuc sözlüğünü döndürür."""
+    sonuc_guncelleme = {}
+
+    if uzanti not in PDF_EXT and uzanti not in IMG_EXT:
+        yeni_yol = dosya_tasi(kaynak, arsiv.parent / "FARKLI_FORMAT_DOSYALAR")
+        return {
+            "Belge Türü": "FARKLI_FORMAT_DOSYALAR", "Yeni Dosya Adı": yeni_yol.name,
+            "Yeni Klasör": str(yeni_yol.parent), "İşlem Durumu": "TAM_TARAMA_FARKLI_FORMAT",
+        }
+
+    try:
+        metin = resim_text_oku(str(kaynak)) if uzanti in IMG_EXT else pdf_text_oku(str(kaynak))
+    except Exception as e:
+        metin = ""
+        sonuc_guncelleme["Hata"] = f"OKUMA_HATASI: {e}"
+
+    tur = belge_turu_bul(metin, eski_ad)
+
+    if not metin and tur == "DIGER_BELGELER":
+        yeni_yol = dosya_tasi(kaynak, arsiv.parent / "OKUNAMAYANLAR")
+        sonuc_guncelleme.update({
+            "Belge Türü": "OKUNAMAYANLAR", "Yeni Dosya Adı": yeni_yol.name,
+            "Yeni Klasör": str(yeni_yol.parent), "İşlem Durumu": "TAM_TARAMA_OKUNAMADI",
+        })
+        return sonuc_guncelleme
+
+    bilgi = bilgi_cek(metin, eski_ad)
+    yeni_ad = yeni_dosya_adi_olustur(tur, bilgi, eski_ad, uzanti)
+    yeni_yol = dosya_tasi(kaynak, arsiv / BELGE_KLASORLERI.get(tur, "DIGER_BELGELER"), yeni_ad)
+
+    sonuc_guncelleme.update({
+        "Yeni Dosya Adı": yeni_yol.name, "Belge Türü": tur,
+        "Plaka": bilgi.get("plaka", ""), "Tank No": bilgi.get("tank_no", ""),
+        "Şasi No": bilgi.get("sasi", ""), "Yabancı Plaka": bilgi.get("yabanci_plaka", ""),
+        "Geçerlilik Tarihi": bilgi.get("tarih", ""), "Kapasite": bilgi.get("kapasite", ""),
+        "Tank Kodu": bilgi.get("tank_kodu", ""), "Sürücü": bilgi.get("surucu", ""),
+        "Yeni Klasör": str(yeni_yol.parent), "İşlem Durumu": "TAM_TARAMA_OKUNDU",
+    })
+    return sonuc_guncelleme
+
+
+def _dosya_yeniden_isle(dosya_yolu, ana_klasor, arsiv):
+    """'Tümünü Yeniden Tara' için tek dosya işleme.
+
+    - OKUNAMAYANLAR / FARKLI_FORMAT_DOSYALAR içindeki dosyalar: içerik yeniden
+      okunmaya çalışılır (zorla yeniden oku ile aynı mantık), başarılı olursa
+      'S' koduyla doğru klasöre taşınır.
+    - PREGATE_ARSIV içinde, kodu 'E' / eski 'PRGT' olan dosyalar: içerik tekrar
+      okunmaz; sadece kodu 'E' yapılır ve doğru (birleşik T9 dahil) klasöre taşınır.
+    - PREGATE_ARSIV içinde, kodu 'S' / eski 'PRGTOK' olan dosyalar: içerik tekrar
+      okunmaz (zaten doğru sınıflandırılmış); sadece kodu 'S' yapılır ve
+      birleşik T9 dahil doğru klasöre taşınır.
+    - Hiç kodu olmayan dosyalar: içerik baştan okunur ve sınıflandırılır."""
+    kaynak = Path(dosya_yolu)
+    ana = Path(ana_klasor)
+    eski_ad, uzanti = kaynak.name, kaynak.suffix.lower()
+
+    sonuc = {
+        "Eski Dosya Adı": eski_ad, "Yeni Dosya Adı": "", "Belge Türü": "", "Plaka": "", "Tank No": "",
+        "Şasi No": "", "Yabancı Plaka": "", "Geçerlilik Tarihi": "", "Kapasite": "", "Tank Kodu": "",
+        "Sürücü": "", "Bulunduğu Klasör": str(kaynak.parent), "Yeni Klasör": "", "İşlem Durumu": "",
+        "Hata": "", "İşlem Tarihi": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
+    }
+
+    try:
+        if kaynak.name.startswith("~$") or not kaynak.exists():
+            sonuc["İşlem Durumu"] = "GECICI_DOSYA_ATLANDI"
+            return sonuc
+
+        okunamayan_klasorler = (
+            (ana / "OKUNAMAYANLAR").resolve(),
+            (ana / "FARKLI_FORMAT_DOSYALAR").resolve(),
+        )
+
+        # ── OKUNAMAYANLAR / FARKLI_FORMAT_DOSYALAR: yeniden okumayı dene ─────────
+        if kaynak.parent.resolve() in okunamayan_klasorler:
+            if _is_prgt_dosya(kaynak.name):
+                tur = belge_turu_dosya_adindan(kaynak.name) or "DIGER_BELGELER"
+                hedef_klasor = arsiv / BELGE_KLASORLERI.get(tur, "DIGER_BELGELER")
+                yeni_ad = kaynak.name if _son_token(kaynak.name) == ELLE_DUZELT_KODU else _kod_degistir(kaynak.name, ELLE_DUZELT_KODU)
+                yeni_yol = dosya_tasi(kaynak, hedef_klasor, yeni_ad)
+                sonuc.update({
+                    "Yeni Dosya Adı": yeni_yol.name, "Belge Türü": tur,
+                    "Yeni Klasör": str(yeni_yol.parent), "İşlem Durumu": "TAM_TARAMA_ELLEDUZ",
+                })
+                return sonuc
+
+            sonuc.update(_yeniden_oku_ve_isimlendir(kaynak, arsiv, eski_ad, uzanti))
+            if not sonuc.get("İşlem Durumu"):
+                sonuc["İşlem Durumu"] = "TAM_TARAMA_HALA_OKUNAMADI"
+            return sonuc
+
+        # ── PREGATE_ARSIV içinde, elle düzeltilmiş (E / eski PRGT) ───────────────
+        if _is_prgt_dosya(kaynak.name):
+            tur = belge_turu_dosya_adindan(kaynak.name) or "DIGER_BELGELER"
+            hedef_klasor = arsiv / BELGE_KLASORLERI.get(tur, "DIGER_BELGELER")
+            yeni_ad = kaynak.name if _son_token(kaynak.name) == ELLE_DUZELT_KODU else _kod_degistir(kaynak.name, ELLE_DUZELT_KODU)
+            yeni_yol = dosya_tasi(kaynak, hedef_klasor, yeni_ad)
+            sonuc.update({
+                "Yeni Dosya Adı": yeni_yol.name, "Belge Türü": tur,
+                "Yeni Klasör": str(yeni_yol.parent), "İşlem Durumu": "TAM_TARAMA_ELLEDUZ",
+            })
+            return sonuc
+
+        # ── PREGATE_ARSIV içinde, daha önce işlenmiş (S / eski PRGTOK) ───────────
+        if _islenmis_mi(kaynak.name):
+            tur = belge_turu_dosya_adindan(kaynak.name) or "DIGER_BELGELER"
+            hedef_klasor = arsiv / BELGE_KLASORLERI.get(tur, "DIGER_BELGELER")
+            yeni_ad = kaynak.name if _son_token(kaynak.name) == ISLEM_KODU else _kod_degistir(kaynak.name, ISLEM_KODU)
+            yeni_yol = dosya_tasi(kaynak, hedef_klasor, yeni_ad)
+            sonuc.update({
+                "Yeni Dosya Adı": yeni_yol.name, "Belge Türü": tur,
+                "Yeni Klasör": str(yeni_yol.parent), "İşlem Durumu": "TAM_TARAMA_KOD_GUNCELLENDI",
+            })
+            return sonuc
+
+        # ── Kodu olmayan dosya: içerik baştan okunur ve sınıflandırılır ──────────
+        sonuc.update(_yeniden_oku_ve_isimlendir(kaynak, arsiv, eski_ad, uzanti))
+        return sonuc
+
+    except Exception as e:
+        sonuc["İşlem Durumu"] = "HATA"
+        sonuc["Hata"] = str(e)
+        return sonuc
+
+
+def tum_dosyalari_yeniden_tara(ana_klasor, log_callback=None):
+    """TÜM arşivdeki dosyaları (PREGATE_ARSIV + OKUNAMAYANLAR + FARKLI_FORMAT_DOSYALAR)
+    içeriklerini yeniden okuyarak baştan sona tekrar tarar.
+
+    - Eski 'PRGTOK' / 'PRGT' kodlu dosyalar yeni 'S' / 'E' koduna çevrilir.
+    - T9_GECICI / T9_MUAYENE / T9_ANA / T9_MUAYENE_SERTIFIKASI klasörlerindeki
+      dosyalar tek bir 'T9' klasöründe birleştirilir.
+    - Bu işlem normal taramadan çok daha uzun sürebilir; bu yüzden ayrı bir
+      buton ile elle tetiklenir."""
+    ana   = Path(ana_klasor)
+    arsiv = klasorleri_hazirla(ana_klasor)
+    sonuclar = []
+
+    _eski_konumlari_tasi(ana_klasor)
+    if log_callback:
+        log_callback("Eski klasor yapisi guncellendi")
+
+    taranacak_dizinler = [arsiv, ana / "OKUNAMAYANLAR", ana / "FARKLI_FORMAT_DOSYALAR"]
+
+    dosya_listesi = []
+    for taban in taranacak_dizinler:
+        if not taban.exists():
+            continue
+        for root, dirs, files in os.walk(taban):
+            root_path = Path(root)
+            if "ISLEM_RAPORLARI" in root_path.parts:
+                continue
+            for file in files:
+                yol = root_path / file
+                if yol.name.startswith("~$"):
+                    continue
+                dosya_listesi.append(yol)
+
+    if len(dosya_listesi) > 1:
+        max_worker = min(4, max(1, os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=max_worker) as ex:
+            future_map = {ex.submit(_dosya_yeniden_isle, yol, ana_klasor, arsiv): yol for yol in dosya_listesi}
+            for fut in as_completed(future_map):
+                sonuc = fut.result()
+                sonuclar.append(sonuc)
+                if log_callback:
+                    log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
+    else:
+        for yol in dosya_listesi:
+            sonuc = _dosya_yeniden_isle(yol, ana_klasor, arsiv)
+            sonuclar.append(sonuc)
+            if log_callback:
+                log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
+
+    _eski_t9_klasorlerini_temizle(ana_klasor)
+
+    df = pd.DataFrame(sonuclar)
+    rapor_klasor = ana / "ISLEM_RAPORLARI"
+    rapor_klasor.mkdir(exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    df.to_excel(rapor_klasor / f"TAM_YENIDEN_TARAMA_RAPORU_{ts}.xlsx", index=False)
+    if not df.empty:
+        df.to_excel(rapor_klasor / "ARSIV_INDEX.xlsx", index=False)
+    return df

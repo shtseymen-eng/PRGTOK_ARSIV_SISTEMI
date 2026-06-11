@@ -5,7 +5,7 @@ from tkinter import filedialog, ttk, messagebox
 import customtkinter as ctk
 from PIL import Image
 
-from motor import klasor_tara, arama_yap, ozet_sayilar, zorla_yeniden_oku
+from motor import klasor_tara, arama_yap, ozet_sayilar, zorla_yeniden_oku, tum_dosyalari_yeniden_tara
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -118,6 +118,15 @@ class PRGTOKApp(ctk.CTk):
             command=self.zorla_oku
         ).grid(row=14, column=0, padx=16, pady=5, sticky="ew")
 
+        ctk.CTkButton(
+            self.sidebar,
+            text="🧠  Tümünü Yeniden Tara",
+            height=46,
+            fg_color="#5A1E8C",
+            hover_color="#7327B0",
+            command=self.tumunu_yeniden_tara
+        ).grid(row=15, column=0, padx=16, pady=5, sticky="ew")
+
         self.signature = ctk.CTkFrame(self.sidebar, fg_color="#06111D")
         self.signature.grid(row=21, column=0, padx=12, pady=16, sticky="sew")
 
@@ -205,27 +214,27 @@ class PRGTOKApp(ctk.CTk):
         for i in range(4):
             self.cat_frame.grid_columnconfigure(i, weight=1)  # 13 kategori, 4 sütun (4 satır)
 
+        # T9_GECICI / T9_MUAYENE / T9_ANA / T9_MUAYENE_SERTIFIKASI artık tek
+        # "T9" klasöründe birleşik; ekranda tek kart olarak gösterilir.
         categories = [
-            "TANK_BASINC_RAPORU",
-            "ISOPA",
-            "T9_GECICI",
-            "T9_MUAYENE",
-            "T9_ANA",
-            "TRAFIK_SIGORTASI",
-            "TEHLIKELI_MADDE_SIGORTASI",
-            "FENNI_MUAYENE",
-            "SIZDIRMAZLIK",
-            "YUKSEKTE_CALISABILIR_SAGLIK_RAPORU",
-            "SRC5",
-            "YABANCI_PLAKA",
-            "DIGER_BELGELER",
-            "OKUNAMAYANLAR",
-            "FARKLI_FORMAT_DOSYALAR",
+            ("TANK_BASINC_RAPORU", "TANK BASINC RAPORU"),
+            ("ISOPA", "ISOPA"),
+            ("T9_ANA", "T9"),
+            ("TRAFIK_SIGORTASI", "TRAFIK SIGORTASI"),
+            ("TEHLIKELI_MADDE_SIGORTASI", "TEHLIKELI MADDE SIGORTASI"),
+            ("FENNI_MUAYENE", "FENNI MUAYENE"),
+            ("SIZDIRMAZLIK", "SIZDIRMAZLIK"),
+            ("YUKSEKTE_CALISABILIR_SAGLIK_RAPORU", "YUKSEKTE CALISABILIR SAGLIK RAPORU"),
+            ("SRC5", "SRC5"),
+            ("YABANCI_PLAKA", "YABANCI PLAKA"),
+            ("DIGER_BELGELER", "DIGER BELGELER"),
+            ("OKUNAMAYANLAR", "OKUNAMAYANLAR"),
+            ("FARKLI_FORMAT_DOSYALAR", "FARKLI FORMAT DOSYALAR"),
         ]
 
         self.cat_labels = {}
 
-        for i, cat in enumerate(categories):
+        for i, (cat, label) in enumerate(categories):
             r, c = divmod(i, 4)
 
             box = ctk.CTkFrame(self.cat_frame, fg_color="#10283D", corner_radius=10)
@@ -233,7 +242,7 @@ class PRGTOKApp(ctk.CTk):
 
             ctk.CTkLabel(
                 box,
-                text=cat.replace("_", " "),
+                text=label,
                 font=("Arial", 12, "bold")
             ).pack(anchor="w", padx=12, pady=(10, 0))
 
@@ -414,6 +423,37 @@ class PRGTOKApp(ctk.CTk):
             messagebox.showerror("Hata", str(e))
             self.status.configure(text="● Hata oluştu")
 
+    def tumunu_yeniden_tara(self):
+        yol = self.ana_klasor.get()
+        if not os.path.isdir(yol):
+            messagebox.showwarning("Klasör seç", "Önce ana klasörü seç.")
+            return
+
+        onay = messagebox.askyesno(
+            "Tümünü Yeniden Tara",
+            "Bu işlem TÜM dosyaları (binlerce dosya olabilir) yeniden okuyup "
+            "yeniden sınıflandırır, eski PRGTOK/PRGT kodlarını S/E koduna çevirir "
+            "ve T9 alt klasörlerini tek 'T9' klasöründe birleştirir.\n\n"
+            "Bu, normal taramadan ÇOK DAHA UZUN sürebilir. Devam edilsin mi?"
+        )
+        if not onay:
+            return
+
+        self.status.configure(text="● Tümünü yeniden tarama başladı... (bu uzun sürebilir)")
+        self.update_idletasks()
+        try:
+            df = tum_dosyalari_yeniden_tara(
+                yol,
+                log_callback=lambda msg: self.status.configure(text="● " + str(msg)[:120])
+            )
+            self.status.configure(text=f"● Tümünü yeniden tarama tamamlandı. İşlenen: {len(df)} dosya")
+            self.ozet_yenile()
+            if df is not None and not df.empty:
+                self.tablo_doldur(df.tail(300))
+        except Exception as e:
+            messagebox.showerror("Hata", str(e))
+            self.status.configure(text="● Hata oluştu")
+
     def rapor_bilgi(self):
         messagebox.showinfo(
             "Raporlar",
@@ -423,7 +463,12 @@ class PRGTOKApp(ctk.CTk):
     def ayarlar_bilgi(self):
         messagebox.showinfo(
             "Ayarlar",
-            "İşlem kodu: PRGTOK\n\nPRGTOK olan dosyalar tekrar okunmaz; yanlış klasördeyse doğru klasöre taşınır."
+            "İşlem kodu: S (otomatik tarandı) / E (elle düzeltildi)\n\n"
+            "S veya E kodu olan dosyalar tekrar okunmaz; yanlış klasördeyse "
+            "doğru klasöre taşınır.\n\n"
+            "Eski PRGTOK/PRGT kodlu dosyalar normal taramada da S/E koduna "
+            "çevrilir. Tüm arşivi içerikten yeniden okutmak ve T9 alt "
+            "klasörlerini birleştirmek için 'Tümünü Yeniden Tara' butonunu kullanın."
         )
 
 

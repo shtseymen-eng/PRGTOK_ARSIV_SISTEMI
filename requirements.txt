@@ -3,3 +3,5 @@ pandas
 openpyxl
 python-pptx
 pyinstaller
+pdfplumber
+pillow

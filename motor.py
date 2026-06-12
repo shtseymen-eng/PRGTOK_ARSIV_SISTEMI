@@ -17,7 +17,12 @@ try:
     _PYTESSERACT_OK = True
 except ImportError:
     _PYTESSERACT_OK = False
-
+# Windows Tesseract yolu
+if _PYTESSERACT_OK:
+    try:
+        pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+    except Exception:
+        pass
 # Word (.docx) icin metin okuma destegi (opsiyonel) -- kurulum: pip install python-docx
 try:
     from docx import Document as _DocxDocument

@@ -5,3 +5,5 @@ python-pptx
 pyinstaller
 pdfplumber
 pillow
+pytesseract
+python-docx

@@ -998,6 +998,25 @@ def _eski_t9_klasorlerini_temizle(ana_klasor):
                 pass
 
 
+def _ilerleme_sarmalayici(log_callback, toplam):
+    """log_callback'i "[n/toplam] mesaj" seklinde bir ilerleme sayaci ile sarmalar.
+    Thread-safe: paralel tarama sirasinda her tamamlanan dosyada sayac +1 artar.
+    Bu sayede kullanici buyuk arsivlerde tarama "donmus mu yoksa calisiyor mu"
+    ayirt edebilir -- durum satirinda "[145/2300] ..." gibi ilerleme gorunur."""
+    if not log_callback:
+        return None
+    sayac = {"n": 0}
+    kilit = threading.Lock()
+
+    def wrapped(msg):
+        with kilit:
+            sayac["n"] += 1
+            n = sayac["n"]
+        log_callback(f"[{n}/{toplam}] {msg}")
+
+    return wrapped
+
+
 def klasor_tara(ana_klasor, log_callback=None):
     arsiv = klasorleri_hazirla(ana_klasor)
     sonuclar = []
@@ -1026,6 +1045,13 @@ def klasor_tara(ana_klasor, log_callback=None):
                 continue
             dosya_listesi.append(yol)
 
+    # Toplam dosya sayisini bildir + ilerleme sayaci ile sarmala -- buyuk
+    # arsivlerde kullanici "[n/toplam]" gorerek tarama yapildigini anlar
+    toplam = len(dosya_listesi)
+    if log_callback:
+        log_callback(f"Taranacak dosya sayisi: {toplam}")
+    ilerleme = _ilerleme_sarmalayici(log_callback, toplam)
+
     # Performans: birden fazla dosya varsa paralel işle (OCR/PDF okuma I/O ağırlıklı)
     if len(dosya_listesi) > 1:
         max_worker = min(4, max(1, os.cpu_count() or 1))
@@ -1034,14 +1060,14 @@ def klasor_tara(ana_klasor, log_callback=None):
             for fut in as_completed(future_map):
                 sonuc = fut.result()
                 sonuclar.append(sonuc)
-                if log_callback:
-                    log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
+                if ilerleme:
+                    ilerleme(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
     else:
         for yol in dosya_listesi:
             sonuc = dosya_isle(str(yol), ana_klasor)
             sonuclar.append(sonuc)
-            if log_callback:
-                log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
+            if ilerleme:
+                ilerleme(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
 
     _eski_t9_klasorlerini_temizle(ana_klasor)
 
@@ -1120,12 +1146,21 @@ def zorla_yeniden_oku(ana_klasor, log_callback=None):
         ana / "FARKLI_FORMAT_DOSYALAR",
     ]
 
+    dosya_listesi = []
     for hedef_dir in hedef_klasorler:
         if not hedef_dir.exists():
             continue
         for dosya in hedef_dir.iterdir():
             if not dosya.is_file() or dosya.name.startswith("~$"):
                 continue
+            dosya_listesi.append(dosya)
+
+    toplam = len(dosya_listesi)
+    if log_callback:
+        log_callback(f"Taranacak dosya sayisi: {toplam}")
+    ilerleme = _ilerleme_sarmalayici(log_callback, toplam)
+
+    for dosya in dosya_listesi:
             uzanti = dosya.suffix.lower()
             sonuc = {
                 "Eski Dosya Adı": dosya.name,
@@ -1148,8 +1183,8 @@ def zorla_yeniden_oku(ana_klasor, log_callback=None):
                 sonuc.update({"Belge Türü": tur, "Yeni Dosya Adı": yol.name,
                               "Yeni Klasör": str(yol.parent), "İşlem Durumu": "PRGT_TASINDI"})
                 sonuclar.append(sonuc)
-                if log_callback:
-                    log_callback(f"PRGT_TASINDI: {dosya.name} → {tur}")
+                if ilerleme:
+                    ilerleme(f"PRGT_TASINDI: {dosya.name} -> {tur}")
                 continue
 
             # PDF / Resim okumayı dene
@@ -1162,8 +1197,8 @@ def zorla_yeniden_oku(ana_klasor, log_callback=None):
             else:
                 sonuc["İşlem Durumu"] = "DESTEKLENMEYEN_FORMAT"
                 sonuclar.append(sonuc)
-                if log_callback:
-                    log_callback(f"DESTEKLENMEYEN_FORMAT: {dosya.name}")
+                if ilerleme:
+                    ilerleme(f"DESTEKLENMEYEN_FORMAT: {dosya.name}")
                 continue
 
             if metin:
@@ -1186,12 +1221,12 @@ def zorla_yeniden_oku(ana_klasor, log_callback=None):
                     "Yeni Klasör": str(yol.parent),
                     "İşlem Durumu": "ZORLA_OKUNDU_TASINDI",
                 })
-                if log_callback:
-                    log_callback(f"ZORLA_OKUNDU_TASINDI: {dosya.name} → {tur}")
+                if ilerleme:
+                    ilerleme(f"ZORLA_OKUNDU_TASINDI: {dosya.name} -> {tur}")
             else:
                 sonuc["İşlem Durumu"] = "HALA_OKUNAMADI"
-                if log_callback:
-                    log_callback(f"HALA_OKUNAMADI: {dosya.name}")
+                if ilerleme:
+                    ilerleme(f"HALA_OKUNAMADI: {dosya.name}")
 
             sonuclar.append(sonuc)
 
@@ -1367,6 +1402,11 @@ def tum_dosyalari_yeniden_tara(ana_klasor, log_callback=None):
                     continue
                 dosya_listesi.append(yol)
 
+    toplam = len(dosya_listesi)
+    if log_callback:
+        log_callback(f"Taranacak dosya sayisi: {toplam}")
+    ilerleme = _ilerleme_sarmalayici(log_callback, toplam)
+
     if len(dosya_listesi) > 1:
         max_worker = min(4, max(1, os.cpu_count() or 1))
         with ThreadPoolExecutor(max_workers=max_worker) as ex:
@@ -1374,14 +1414,14 @@ def tum_dosyalari_yeniden_tara(ana_klasor, log_callback=None):
             for fut in as_completed(future_map):
                 sonuc = fut.result()
                 sonuclar.append(sonuc)
-                if log_callback:
-                    log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
+                if ilerleme:
+                    ilerleme(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
     else:
         for yol in dosya_listesi:
             sonuc = _dosya_yeniden_isle(yol, ana_klasor, arsiv)
             sonuclar.append(sonuc)
-            if log_callback:
-                log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
+            if ilerleme:
+                ilerleme(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
 
     _eski_t9_klasorlerini_temizle(ana_klasor)
 

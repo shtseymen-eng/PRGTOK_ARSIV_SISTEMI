@@ -144,7 +144,7 @@ class PRGTOKApp(ctk.CTk):
 
         ctk.CTkLabel(
             self.signature,
-            text="Versiyon: 1.0.2",
+            text="Versiyon: 1.0.3",
             text_color="#AFC3D5"
         ).pack(padx=10, pady=(0, 18))
 

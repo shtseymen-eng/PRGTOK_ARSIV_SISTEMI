@@ -18,6 +18,13 @@ try:
 except ImportError:
     _PYTESSERACT_OK = False
 
+# Word (.docx) icin metin okuma destegi (opsiyonel) -- kurulum: pip install python-docx
+try:
+    from docx import Document as _DocxDocument
+    _DOCX_OK = True
+except ImportError:
+    _DOCX_OK = False
+
 OCR_TIMEOUT = 25              # OCR icin maksimum bekleme suresi (saniye) - takilan dosya tarama akisini kilitlemesin
 
 ISLEM_KODU = "S"             # Program tarafından otomatik tarandı/sınıflandırıldı işareti
@@ -72,7 +79,8 @@ TUR_DISPLAY_REVERSE = {v.replace(" ", "_"): k for k, v in TUR_DISPLAY.items()}
 
 
 PDF_EXT = {".pdf"}
-IMG_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+IMG_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp", ".gif"}
+DOCX_EXT = {".docx"}
 
 TURK_PLAKA_RE = re.compile(r"\b(0[1-9]|[1-7][0-9]|8[01])\s*[A-ZÇĞİÖŞÜ]{1,3}\s*\d{2,4}\b", re.I)
 TANK_NO_RE = re.compile(r"\b[A-Z]{4}\s?\d{6}[-\s]?\d\b", re.I)
@@ -259,6 +267,41 @@ def resim_text_oku(dosya_yolu):
         return ""
     except Exception:
         return ""
+
+
+def docx_text_oku(dosya_yolu):
+    """Word (.docx) belgesinden paragraf ve tablo hücrelerindeki metni çıkarır.
+    Eski .doc (binary) formatı desteklenmez -- sadece .docx."""
+    if not _DOCX_OK:
+        return ""
+    try:
+        belge = _DocxDocument(dosya_yolu)
+        parcalar = [p.text for p in belge.paragraphs]
+        for tablo in belge.tables:
+            for satir in tablo.rows:
+                for hucre in satir.cells:
+                    parcalar.append(hucre.text)
+        return "\n".join(parcalar).strip()
+    except Exception:
+        return ""
+
+
+def desteklenen_uzanti(uzanti):
+    """Programın içerik okuyabildiği (PDF / resim+OCR / Word) bir uzantı mı?"""
+    return uzanti in PDF_EXT or uzanti in IMG_EXT or uzanti in DOCX_EXT
+
+
+def belge_metni_oku(dosya_yolu, uzanti, max_sayfa=None):
+    """Uzantıya göre uygun okuyucuya yönlendirir. PDF için max_sayfa
+    (performans sınırlaması) desteklenir; resim ve Word için yoksayılır.
+    Desteklenmeyen uzantılarda "" döner."""
+    if uzanti in PDF_EXT:
+        return pdf_text_oku(dosya_yolu, max_sayfa=max_sayfa)
+    if uzanti in IMG_EXT:
+        return resim_text_oku(dosya_yolu)
+    if uzanti in DOCX_EXT:
+        return docx_text_oku(dosya_yolu)
+    return ""
 
 
 def plaka_bul(metin):
@@ -709,15 +752,9 @@ def dosya_isle(dosya_yolu, ana_klasor):
         if _is_prgt_dosya(kaynak.name):
             # İçeriği oku → türü belirle (dosya adı fallback)
             tur = ""
-            if uzanti in PDF_EXT:
+            if desteklenen_uzanti(uzanti):
                 try:
-                    _m = pdf_text_oku(str(kaynak))
-                    tur = belge_turu_bul(_m, kaynak.name)
-                except Exception:
-                    pass
-            elif uzanti in IMG_EXT:
-                try:
-                    _m = resim_text_oku(str(kaynak))
+                    _m = belge_metni_oku(str(kaynak), uzanti)
                     tur = belge_turu_bul(_m, kaynak.name)
                 except Exception:
                     pass
@@ -743,9 +780,9 @@ def dosya_isle(dosya_yolu, ana_klasor):
             tur = belge_turu_dosya_adindan(kaynak.name)
 
             # OKUNAMAYANLAR → yeniden okuma dene
-            if tur == "OKUNAMAYANLAR" and uzanti in (PDF_EXT | IMG_EXT):
+            if tur == "OKUNAMAYANLAR" and desteklenen_uzanti(uzanti):
                 try:
-                    _m = pdf_text_oku(str(kaynak)) if uzanti in PDF_EXT else resim_text_oku(str(kaynak))
+                    _m = belge_metni_oku(str(kaynak), uzanti)
                 except Exception:
                     _m = ""
                 if _m:
@@ -802,7 +839,7 @@ def dosya_isle(dosya_yolu, ana_klasor):
             return sonuc
 
         # ── Desteklenmeyen format ────────────────────────────────────────────────
-        if uzanti not in PDF_EXT and uzanti not in IMG_EXT:
+        if not desteklenen_uzanti(uzanti):
             yeni_yol = dosya_tasi(kaynak, arsiv.parent / "FARKLI_FORMAT_DOSYALAR")
             sonuc.update({
                 "Belge Türü": "FARKLI_FORMAT_DOSYALAR",
@@ -824,6 +861,18 @@ def dosya_isle(dosya_yolu, ana_klasor):
                         "Yeni Klasör": str(yeni_yol.parent),
                         "İşlem Durumu": "TESSERACT_KURULU_DEGIL",
                         "Hata": "pip install pytesseract + winget install UB-Mannheim.TesseractOCR",
+                    })
+                    return sonuc
+            elif uzanti in DOCX_EXT:
+                metin = docx_text_oku(str(kaynak))
+                if not metin and not _DOCX_OK:
+                    yeni_yol = dosya_tasi(kaynak, arsiv.parent / "FARKLI_FORMAT_DOSYALAR")
+                    sonuc.update({
+                        "Belge Türü": "FARKLI_FORMAT_DOSYALAR",
+                        "Yeni Dosya Adı": yeni_yol.name,
+                        "Yeni Klasör": str(yeni_yol.parent),
+                        "İşlem Durumu": "PYTHON_DOCX_KURULU_DEGIL",
+                        "Hata": "pip install python-docx",
                     })
                     return sonuc
             else:
@@ -1077,13 +1126,11 @@ def zorla_yeniden_oku(ana_klasor, log_callback=None):
 
             # PDF / Resim okumayı dene
             metin = ""
-            if uzanti in PDF_EXT:
+            if desteklenen_uzanti(uzanti):
                 try:
-                    metin = pdf_text_oku(str(dosya))
+                    metin = belge_metni_oku(str(dosya), uzanti)
                 except Exception as e:
                     sonuc["Hata"] = str(e)
-            elif uzanti in IMG_EXT:
-                metin = resim_text_oku(str(dosya))
             else:
                 sonuc["İşlem Durumu"] = "DESTEKLENMEYEN_FORMAT"
                 sonuclar.append(sonuc)
@@ -1136,7 +1183,7 @@ def _yeniden_oku_ve_isimlendir(kaynak, arsiv, eski_ad, uzanti):
     formatsa FARKLI_FORMAT_DOSYALAR'a taşır. Sonuc sözlüğünü döndürür."""
     sonuc_guncelleme = {}
 
-    if uzanti not in PDF_EXT and uzanti not in IMG_EXT:
+    if not desteklenen_uzanti(uzanti):
         yeni_yol = dosya_tasi(kaynak, arsiv.parent / "FARKLI_FORMAT_DOSYALAR")
         return {
             "Belge Türü": "FARKLI_FORMAT_DOSYALAR", "Yeni Dosya Adı": yeni_yol.name,
@@ -1144,7 +1191,7 @@ def _yeniden_oku_ve_isimlendir(kaynak, arsiv, eski_ad, uzanti):
         }
 
     try:
-        metin = resim_text_oku(str(kaynak)) if uzanti in IMG_EXT else pdf_text_oku(str(kaynak))
+        metin = belge_metni_oku(str(kaynak), uzanti)
     except Exception as e:
         metin = ""
         sonuc_guncelleme["Hata"] = f"OKUMA_HATASI: {e}"

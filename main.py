@@ -1,4 +1,5 @@
 import os
+import threading
 from pathlib import Path
 from tkinter import filedialog, ttk, messagebox
 
@@ -92,40 +93,44 @@ class PRGTOKApp(ctk.CTk):
             command=self.klasor_sec
         ).grid(row=11, column=0, padx=16, pady=5, sticky="ew")
 
-        ctk.CTkButton(
+        self.btn_tara = ctk.CTkButton(
             self.sidebar,
             text="🚀  Klasörü Tara",
             height=46,
             fg_color="#0B7A32",
             hover_color="#0A632A",
             command=self.tara
-        ).grid(row=12, column=0, padx=16, pady=5, sticky="ew")
+        )
+        self.btn_tara.grid(row=12, column=0, padx=16, pady=5, sticky="ew")
 
-        ctk.CTkButton(
+        self.btn_yenile = ctk.CTkButton(
             self.sidebar,
             text="🔄  Yenile",
             height=42,
             fg_color="#27394A",
             command=self.ozet_yenile
-        ).grid(row=13, column=0, padx=16, pady=5, sticky="ew")
+        )
+        self.btn_yenile.grid(row=13, column=0, padx=16, pady=5, sticky="ew")
 
-        ctk.CTkButton(
+        self.btn_zorla = ctk.CTkButton(
             self.sidebar,
             text="♻️  Zorla Yeniden Oku",
             height=46,
             fg_color="#6B2F00",
             hover_color="#8B3D00",
             command=self.zorla_oku
-        ).grid(row=14, column=0, padx=16, pady=5, sticky="ew")
+        )
+        self.btn_zorla.grid(row=14, column=0, padx=16, pady=5, sticky="ew")
 
-        ctk.CTkButton(
+        self.btn_tumunu = ctk.CTkButton(
             self.sidebar,
             text="🧠  Tümünü Yeniden Tara",
             height=46,
             fg_color="#5A1E8C",
             hover_color="#7327B0",
             command=self.tumunu_yeniden_tara
-        ).grid(row=15, column=0, padx=16, pady=5, sticky="ew")
+        )
+        self.btn_tumunu.grid(row=15, column=0, padx=16, pady=5, sticky="ew")
 
         self.signature = ctk.CTkFrame(self.sidebar, fg_color="#06111D")
         self.signature.grid(row=21, column=0, padx=12, pady=16, sticky="sew")
@@ -339,6 +344,30 @@ class PRGTOKApp(ctk.CTk):
             self.ozet_yenile()
             self.status.configure(text="● Klasör seçildi")
 
+    def _durum_guncelle(self, msg):
+        """Arama/tarama sırasında durum satırını günceller. self.after() ile
+        çağrılır, böylece her zaman ana (Tkinter) thread'inde çalışır."""
+        self.status.configure(text="● " + str(msg)[:120])
+
+    def _set_tarama_butonlari(self, enabled):
+        durum = "normal" if enabled else "disabled"
+        for btn in (self.btn_tara, self.btn_zorla, self.btn_tumunu, self.btn_yenile):
+            btn.configure(state=durum)
+
+    def _arka_planda_calistir(self, is_yap, bitince):
+        """is_yap() arka plan thread'inde çalışır (uzun süren tarama/OCR/PDF
+        okuma vb.); arayüz bu sırada donmaz. is_yap() bittiğinde (ya da hata
+        verdiğinde) bitince(sonuc, hata) ana thread üzerinden (self.after)
+        çağrılır."""
+        def calistir():
+            try:
+                sonuc = is_yap()
+                self.after(0, lambda: bitince(sonuc, None))
+            except Exception as e:
+                self.after(0, lambda: bitince(None, e))
+
+        threading.Thread(target=calistir, daemon=True).start()
+
     def tara(self):
         yol = self.ana_klasor.get()
 
@@ -347,21 +376,25 @@ class PRGTOKApp(ctk.CTk):
             return
 
         self.status.configure(text="● Tarama başladı...")
-        self.update_idletasks()
+        self._set_tarama_butonlari(False)
 
-        try:
-            df = klasor_tara(
+        def is_yap():
+            return klasor_tara(
                 yol,
-                log_callback=lambda msg: self.status.configure(text="● " + str(msg)[:120])
+                log_callback=lambda msg: self.after(0, self._durum_guncelle, msg)
             )
 
+        def bitince(df, hata):
+            self._set_tarama_butonlari(True)
+            if hata is not None:
+                messagebox.showerror("Hata", str(hata))
+                self.status.configure(text="● Hata oluştu")
+                return
             self.status.configure(text=f"● Tarama tamamlandı. İşlenen kayıt: {len(df)}")
             self.ozet_yenile()
             self.tablo_doldur(df.tail(300))
 
-        except Exception as e:
-            messagebox.showerror("Hata", str(e))
-            self.status.configure(text="● Hata oluştu")
+        self._arka_planda_calistir(is_yap, bitince)
 
     def ara(self):
         yol = self.ana_klasor.get()
@@ -408,20 +441,28 @@ class PRGTOKApp(ctk.CTk):
         if not os.path.isdir(yol):
             messagebox.showwarning("Klasör seç", "Önce ana klasörü seç.")
             return
+
         self.status.configure(text="● Zorla okuma başladı...")
-        self.update_idletasks()
-        try:
-            df = zorla_yeniden_oku(
+        self._set_tarama_butonlari(False)
+
+        def is_yap():
+            return zorla_yeniden_oku(
                 yol,
-                log_callback=lambda msg: self.status.configure(text="● " + str(msg)[:120])
+                log_callback=lambda msg: self.after(0, self._durum_guncelle, msg)
             )
+
+        def bitince(df, hata):
+            self._set_tarama_butonlari(True)
+            if hata is not None:
+                messagebox.showerror("Hata", str(hata))
+                self.status.configure(text="● Hata oluştu")
+                return
             self.status.configure(text=f"● Zorla okuma tamamlandı. İşlenen: {len(df)} dosya")
             self.ozet_yenile()
             if df is not None and not df.empty:
                 self.tablo_doldur(df)
-        except Exception as e:
-            messagebox.showerror("Hata", str(e))
-            self.status.configure(text="● Hata oluştu")
+
+        self._arka_planda_calistir(is_yap, bitince)
 
     def tumunu_yeniden_tara(self):
         yol = self.ana_klasor.get()
@@ -440,19 +481,26 @@ class PRGTOKApp(ctk.CTk):
             return
 
         self.status.configure(text="● Tümünü yeniden tarama başladı... (bu uzun sürebilir)")
-        self.update_idletasks()
-        try:
-            df = tum_dosyalari_yeniden_tara(
+        self._set_tarama_butonlari(False)
+
+        def is_yap():
+            return tum_dosyalari_yeniden_tara(
                 yol,
-                log_callback=lambda msg: self.status.configure(text="● " + str(msg)[:120])
+                log_callback=lambda msg: self.after(0, self._durum_guncelle, msg)
             )
+
+        def bitince(df, hata):
+            self._set_tarama_butonlari(True)
+            if hata is not None:
+                messagebox.showerror("Hata", str(hata))
+                self.status.configure(text="● Hata oluştu")
+                return
             self.status.configure(text=f"● Tümünü yeniden tarama tamamlandı. İşlenen: {len(df)} dosya")
             self.ozet_yenile()
             if df is not None and not df.empty:
                 self.tablo_doldur(df.tail(300))
-        except Exception as e:
-            messagebox.showerror("Hata", str(e))
-            self.status.configure(text="● Hata oluştu")
+
+        self._arka_planda_calistir(is_yap, bitince)
 
     def rapor_bilgi(self):
         messagebox.showinfo(

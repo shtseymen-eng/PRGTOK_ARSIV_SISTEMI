@@ -18,6 +18,8 @@ try:
 except ImportError:
     _PYTESSERACT_OK = False
 
+OCR_TIMEOUT = 25              # OCR icin maksimum bekleme suresi (saniye) - takilan dosya tarama akisini kilitlemesin
+
 ISLEM_KODU = "S"             # Program tarafından otomatik tarandı/sınıflandırıldı işareti
 ELLE_DUZELT_KODU = "E"       # Elle düzeltildi işareti: isim değişmez (kod hariç), sadece doğru klasöre taşınır
                               # Kullanım: dosya adının SONUNA boşluk + E ekle
@@ -226,7 +228,11 @@ def pdf_text_oku(dosya_yolu, max_sayfa=None):
 def resim_text_oku(dosya_yolu):
     """OCR ile resim dosyasından metin çıkar. Tesseract + Türkçe dil paketi gerektirir.
     Kurulum (Mac): brew install tesseract tesseract-lang
-    """
+
+    NOT: pytesseract'a OCR_TIMEOUT (varsayılan 25sn) verilir. Bozuk/çok karmaşık
+    bir görsel tesseract'ı sonsuza kadar bekletirse, süre aşımında işlem
+    iptal edilir ve "" döndürülür — bu sayede tek bir kötü dosya tüm taramayı
+    kilitlemez (program "donmaz")."""
     if not _PYTESSERACT_OK:
         return ""
     try:
@@ -237,11 +243,20 @@ def resim_text_oku(dosya_yolu):
             oran = MAX_BOYUT / max(img.size)
             yeni_boyut = (max(1, int(img.size[0] * oran)), max(1, int(img.size[1] * oran)))
             img = img.resize(yeni_boyut, _PILImage.LANCZOS)
-        # Türkçe+İngilizce; dil paketi yoksa sadece İngilizce dene
-        try:
-            return pytesseract.image_to_string(img, lang="tur+eng", config="--psm 6").strip()
-        except Exception:
-            return pytesseract.image_to_string(img, lang="eng", config="--psm 6").strip()
+        # Türkçe+İngilizce; süre aşımında veya hata durumunda sadece İngilizce dene.
+        # Süre aşımı (RuntimeError) bir kez daha denenmez — çift bekleme olmasın.
+        for lang in ("tur+eng", "eng"):
+            try:
+                return pytesseract.image_to_string(
+                    img, lang=lang, config="--psm 6", timeout=OCR_TIMEOUT
+                ).strip()
+            except RuntimeError as e:
+                if "timeout" in str(e).lower():
+                    return ""
+                continue
+            except Exception:
+                continue
+        return ""
     except Exception:
         return ""
 

@@ -32,13 +32,10 @@ except ImportError:
 
 OCR_TIMEOUT = 25              # OCR icin maksimum bekleme suresi (saniye) - takilan dosya tarama akisini kilitlemesin
 
-ISLEM_KODU = "S"             # Program tarafından otomatik tarandı/sınıflandırıldı işareti
-ELLE_DUZELT_KODU = "E"       # Elle düzeltildi işareti: isim değişmez (kod hariç), sadece doğru klasöre taşınır
-                              # Kullanım: dosya adının SONUNA boşluk + E ekle
-                              # Örn: "Belge T9 ANA E.pdf" → T9 klasörüne taşınır
+ISLEM_KODU = "P"
+ELLE_DUZELT_KODU = "E"
 
-# Eski (geriye dönük uyumluluk) kodlar – yeni taramada S / E koduna çevrilir
-ESKI_ISLEM_KODU = "PRGTOK"
+ESKI_ISLEM_KODLARI = ("S", "PRGTOK")
 ESKI_ELLE_DUZELT_KODU = "PRGT"
 
 BELGE_KLASORLERI = {
@@ -556,9 +553,11 @@ def _son_token(dosya_adi):
 
 
 def _islenmis_mi(dosya_adi):
-    """Dosya program tarafından otomatik tarandı mı? (yeni kod 'S' veya eski 'PRGTOK')"""
+    """Dosya program tarafından otomatik tarandı mı? (sadece güncel kod 'P')
+    Sonu S / PRGTOK olan eski dosyalar BURADA 'işlenmiş' sayılmaz; böylece
+    eski arşiv yeniden taranıp 'P' koduna güncellenebilir."""
     son = _son_token(dosya_adi)
-    return son in (ISLEM_KODU, ESKI_ISLEM_KODU)
+    return son == ISLEM_KODU
 
 
 def _is_prgt_dosya(dosya_adi):
@@ -574,7 +573,7 @@ def _kod_degistir(dosya_adi, yeni_kod):
     Son parça bilinen bir kod değilse, yeni_kod sona eklenir."""
     p = Path(dosya_adi)
     stem = p.stem.strip()
-    bilinen_kodlar = (ISLEM_KODU, ELLE_DUZELT_KODU, ESKI_ISLEM_KODU, ESKI_ELLE_DUZELT_KODU)
+    bilinen_kodlar = (ISLEM_KODU, ELLE_DUZELT_KODU, ESKI_ELLE_DUZELT_KODU) + ESKI_ISLEM_KODLARI
     parcalar = stem.split(" ")
     if parcalar and parcalar[-1].upper() in bilinen_kodlar:
         parcalar[-1] = yeni_kod
@@ -583,9 +582,27 @@ def _kod_degistir(dosya_adi, yeni_kod):
     return " ".join(x for x in parcalar if x) + p.suffix
 
 
+# Gevşek anahtar kelime eşleşmesi: dosya adında bu kısa ifadelerden biri
+# geçiyorsa (tam klasör adı eşleşmese de) ilgili kategoriye yönlendirilir.
+# Örn: "Ahmet Yilmaz Fenni.pdf" → FENNI_MUAYENE, "34 ABC 123 Tank Basinc.pdf" → TANK_BASINC_RAPORU
+_BELGE_TUR_ANAHTAR_KELIME = {
+    "FENNI": "FENNI_MUAYENE",
+    "SIZDIRMAZLIK": "SIZDIRMAZLIK",
+    "ISOPA": "ISOPA",
+    "SRC5": "SRC5",
+    "SRC-5": "SRC5",
+    "SRC_5": "SRC5",
+    "SRC 5": "SRC5",
+    "TANK_BASINC": "TANK_BASINC_RAPORU",
+    "TANK BASINC": "TANK_BASINC_RAPORU",
+}
+
+
 def belge_turu_dosya_adindan(dosya_adi):
-    # Boşluklu ve alt tireli isimlerin ikisini de tanımak için normalize et
-    ad = dosya_adi.upper().replace(" ", "_")
+    # Türkçe karakterleri ASCII'ye çevir; boşluklu ve alt tireli isimlerin
+    # ikisini de tanımak için normalize et
+    tr_map = str.maketrans("ÇĞİÖŞÜçğıöşü", "CGIOSUcgiosu")
+    ad = dosya_adi.translate(tr_map).upper().replace(" ", "_")
 
     # Eski T9_MUAYENE_SERTIFIKASI dosyalarını T9_ANA'ya yönlendir
     if "T9_MUAYENE_SERTIFIKASI" in ad or "T9_SERTIFIKASI" in ad:
@@ -593,6 +610,12 @@ def belge_turu_dosya_adindan(dosya_adi):
 
     for tur in BELGE_KLASORLERI.keys():
         if tur not in ("ISLEM_RAPORLARI", "T9_MUAYENE_SERTIFIKASI") and tur in ad:
+            return tur
+
+    # Gevşek anahtar kelime eşleşmesi (yukarıdaki tam klasör adı eşleşmesi
+    # başarısız olduysa devreye girer)
+    for anahtar, tur in _BELGE_TUR_ANAHTAR_KELIME.items():
+        if anahtar.replace(" ", "_") in ad:
             return tur
 
     # PRGT dosyaları için TUR_DISPLAY kısa adlarıyla ters arama

@@ -1,0 +1,65 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && pip install customtkinter pdfplumber Pillow pandas openpyxl pytesseract pdf2image pymupdf pyinstaller
+
+      - name: Download and install Tesseract
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/UB-Mannheim/tesseract/releases/download/v5.5.0.20241111/tesseract-ocr-w64-setup-5.5.0.20241111.exe" -OutFile tesseract.exe
+          Start-Process tesseract.exe -ArgumentList '/S /D=C:\tess' -Wait
+
+      - name: Download and extract Poppler
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://github.com/oschwartz10612/poppler-windows/releases/download/v24.08.0-0/Release-24.08.0-0.zip" -OutFile poppler.zip
+          Expand-Archive poppler.zip -DestinationPath C:\pop -Force
+
+      - name: Build EXE
+        shell: cmd
+        run: >
+          pyinstaller --noconfirm --onefile --windowed
+          --name PRGTOK_ARSIV_SISTEMI
+          --icon assets/app_icon.ico
+          --add-data "assets;assets"
+          --add-data "main_paned.py;."
+          --add-data "C:\tess;tesseract"
+          --add-data "C:\pop\poppler-24.08.0\Library\bin;poppler/bin"
+          --hidden-import pytesseract
+          --hidden-import pdf2image
+          --hidden-import fitz
+          main.py
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Setup
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\kurulum.iss"'
+
+      - name: Upload Setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: PRGTOK_Kurulum_Sihirbazi
+          path: installer/cikti/PRGTOK_Arsiv_Kurulum.exe
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: PRGTOK_EXE
+          path: dist/PRGTOK_ARSIV_SISTEMI.exe

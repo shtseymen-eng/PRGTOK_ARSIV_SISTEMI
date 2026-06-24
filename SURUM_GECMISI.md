@@ -12,6 +12,33 @@ Sürümleme: `MAJOR.MINOR.PATCH`
 
 ----------------------------------------------------------------------
 
+## v2.4.0 — LR/BV Tank Basınç Desteği, Klasör Yapısı ve OCR Konsol Düzeltmesi
+
+**Tarih:** 2026-06-24
+
+**Değişiklik 1 — Lloyd's Register (LR) tank basınç raporu tam desteği:**
+- LR formatındaki raporlar artık T9 yerine doğru şekilde TANK BASINC RAPORU
+  olarak sınıflandırılıyor.
+- Tank numarası: "Owner's Serial number" başlığı altından okunuyor (örn. KRIU226698-7).
+- Tarih: "Next Inspection date May 2026" formatı tanınıyor, doğru ay.yıl döndürüyor.
+- Kapasite: "25,940 litres" ve "26,000 Litres UN Portable Tank" formatları okunuyor.
+- Tank kodu: L4BN gibi kodlar doğru çıkarılıyor.
+
+**Değişiklik 2 — Klasör yapısı sadeleştirildi:**
+- Önceden: Taramalar → PREGATE ARSIV → [alt klasörler]
+- Artık: Taramalar → [alt klasörler direkt burada]
+- Seçilen klasörün altına araya ekstra "PREGATE ARSIV" klasörü açılmıyor.
+
+**Değişiklik 3 — OCR sırasında siyah konsol penceresi kapatıldı:**
+- Tesseract ve Poppler çalışırken Windows'ta açılan siyah CMD penceresi
+  artık görünmüyor. CREATE_NO_WINDOW bayrağı subprocess çağrılarına eklendi.
+
+**Değişiklik 4 — GitHub Actions ile otomatik kurulum build pipeline'ı:**
+- Her v* etiketi push'unda otomatik olarak kurulum .exe oluşturuluyor.
+- PyInstaller + Inno Setup ile tek tıkla kurulum sihirbazı üretiliyor.
+
+----------------------------------------------------------------------
+
 ----------------------------------------------------------------------
 
 ----------------------------------------------------------------------

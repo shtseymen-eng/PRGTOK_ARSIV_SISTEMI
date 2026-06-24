@@ -4,7 +4,7 @@
 ; menusu kisayollarini otomatik olusturmak; dogru ikonu kullanmak.
 
 #define MyAppName "PRGTOK Arsiv Sistemi"
-#define MyAppVersion "1.0"
+#define MyAppVersion "2.4.0"
 #define MyAppPublisher "Poliport"
 #define MyAppExeName "PRGTOK_ARSIV_SISTEMI.exe"
 
@@ -17,7 +17,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=cikti
-OutputBaseFilename=PRGTOK_Arsiv_Kurulum
+OutputBaseFilename=PRGTOK_Arsiv_Kurulum_v{#MyAppVersion}
 SetupIconFile=..\assets\app_icon.ico
 Compression=lzma
 SolidCompression=yes

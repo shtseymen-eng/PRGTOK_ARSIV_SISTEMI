@@ -47,9 +47,31 @@ try:
     OCR_KULLANILABILIR = True
 
     if os.name == "nt":
+        import subprocess, sys as _sys
+
+        # Windows'ta Tesseract ve Poppler cagrilirken siyah konsol
+        # penceresi acilmasin: subprocess'e CREATE_NO_WINDOW bayragi ver.
+        _CREATE_NO_WINDOW = 0x08000000
+
+        # pdf2image icindeki Popen cagrisini gizli yap
+        _orijinal_popen = subprocess.Popen
+        def _gizli_popen(*args, **kwargs):
+            if os.name == "nt":
+                kwargs.setdefault("creationflags", 0)
+                kwargs["creationflags"] |= _CREATE_NO_WINDOW
+                kwargs.setdefault("startupinfo", subprocess.STARTUPINFO())
+                kwargs["startupinfo"].dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                kwargs["startupinfo"].wShowWindow = 0
+            return _orijinal_popen(*args, **kwargs)
+        subprocess.Popen = _gizli_popen
+
+        # pytesseract icin de ayni ayar
+        _ocr_engine.pytesseract.get_tesseract_version.__globals__.get(
+            "subprocess", subprocess)  # noqa – sadece import tetikle
+
         # PyInstaller ile paketlendiginde Tesseract ve Poppler exe icine
         # gomulur; sys._MEIPASS bu gecici klasore isaret eder.
-        _meipass = getattr(__import__("sys"), "_MEIPASS", None)
+        _meipass = getattr(_sys, "_MEIPASS", None)
 
         _olasi_tesseract_yollari = []
         if _meipass:
@@ -66,7 +88,7 @@ try:
 except Exception:
     OCR_KULLANILABILIR = False
 
-SURUM = "2.3.5"
+SURUM = "2.4.0"
 
 # ----------------------------------------------------------------------------
 # ISLEM KODLARI
@@ -187,14 +209,37 @@ def en_date_formatla(tarih):
 
 
 def dnv_next_due_bul(metin):
+    _AY_MAP = {
+        "JANUARY":"01","FEBRUARY":"02","MARCH":"03","APRIL":"04",
+        "MAY":"05","JUNE":"06","JULY":"07","AUGUST":"08",
+        "SEPTEMBER":"09","OCTOBER":"10","NOVEMBER":"11","DECEMBER":"12",
+        "JAN":"01","FEB":"02","MAR":"03","APR":"04","JUN":"06",
+        "JUL":"07","AUG":"08","SEP":"09","OCT":"10","NOV":"11","DEC":"12",
+    }
+    buyuk = metin.upper()
     for pattern in [
         r"DATE\s+NEXT\s+INSPECTION\s+DUE\s*[:\-]?\s*(0?[1-9]|1[0-2])[/.-](\d{2})",
         r"NEXT\s+INSPECTION\s+DUE\s*[:\-]?\s*(0?[1-9]|1[0-2])[/.-](\d{2})",
     ]:
-        m = re.search(pattern, metin.upper())
+        m = re.search(pattern, buyuk)
         if m:
             ay, yil = m.groups()
             return f"{ay.zfill(2)}.20{yil}"
+    # Lloyd's Register: "Next Inspection date May 2026"
+    m = re.search(
+        r"NEXT\s+INSPECTION\s+DATE\s+([A-Z]+)\s+(20\d{2})", buyuk)
+    if m:
+        ay_ad, yil = m.groups()
+        ay = _AY_MAP.get(ay_ad)
+        if ay:
+            return f"{ay}.{yil}"
+    # BV: "Date Prochain controle 07-2026"
+    m = re.search(
+        r"(?:DATE\s+PROCHAIN\s+CONTR[OÔ]LE|NEXT\s+INSPECTION\s+DATE)\s*(\d{2})[/-](20\d{2})",
+        buyuk)
+    if m:
+        ay, yil = m.groups()
+        return f"{ay}.{yil}"
     return ""
 
 
@@ -368,10 +413,10 @@ def plaka_bul(metin):
 
 def tank_no_bul(metin):
     """Tank/konteyner numarasini bulur. Once guvenilir bir etiketin
-    (Owner No / Marquage / Immatriculation) yanindaki numarayi arar;
-    bulamazsa genel aramaya doner. 'Old number' (eski/iptal numara)
-    ifadesinin yanindaki numara HER ZAMAN atlanir, cunku bu artik
-    gecerli olmayan bir numaradir."""
+    (Owner No / Marquage / Immatriculation / Owner's Serial number)
+    yanindaki numarayi arar; bulamazsa genel aramaya doner. 'Old number'
+    (eski/iptal numara) ifadesinin yanindaki numara HER ZAMAN atlanir,
+    cunku bu artik gecerli olmayan bir numaradir."""
     buyuk = metin.upper()
 
     # "OLD NUMBER: XXXX-X" gibi ifadeleri once metinden cikar, boylece
@@ -383,6 +428,8 @@ def tank_no_bul(metin):
         r"OWNER\s*N[O°]\.?\s*[:\-]?\s*",
         r"MARQUAGE\s*[/]?\s*MARKING\s*[:\-]?\s*",
         r"IMMATRICULATION\s*/?\s*UNIT\s*[:\-]?\s*",
+        # Lloyd's Register: "Owner's Serial number" basliginin altindaki satir
+        r"OWNER['\u2019]?S\s+SERIAL\s+NUMBER\s*\n\s*",
     ):
         etiket_m = re.search(etiket_pattern + r"([A-Z]{2,4}\s?\d{5,6}\s?-?\s?\d)", buyuk_temiz)
         if etiket_m:
@@ -410,6 +457,9 @@ def kapasite_bul(metin):
         r"KAPASITE\s*\(L\).*?TOPLAM\s*\(TOTAL\)\s*[:\-]?\s*(\d{4,6})",
         r"TOPLAM\s*\(TOTAL\)\s*[:\-]?\s*(\d{4,6})",
         r"TANK\s+HACMI\s*[:\-]?\s*(\d{4,6})\s*LT",
+        # Lloyd's Register: "Capacity 25,940 litres" veya "26,000 Litres UN Portable Tank"
+        r"CAPACITY\s+(\d{4,6})\s+LITRE",
+        r"(\d{4,6})\s+LITRES?\s+UN\s+PORTABLE\s+TANK",
     ]:
         m = re.search(pattern, temiz, re.S)
         if m:
@@ -595,7 +645,15 @@ def belge_turu_bul(metin, dosya_adi="", ozel_kelimeler=None):
             "TANK BİLGİLERİ" in m or "TANK BILGILERI" in m or
             "TANK KODU" in m or "TASIMA BIRIM TIPI" in m or "TAŞIMA BIRIM TIPI" in m or
             bool(re.search(r"\bUN\s*\d{4}\b", m)) or
-            ("INSPECTION CERTIFICATE" in m and ("TANK" in m or "CONTAINER" in m or "ADR" in m)) or
+            # INSPECTION CERTIFICATE: arac/ADR onayi olanlar T9;
+            # Tank basinc raporlari (BV, Lloyd's Register, IIC vb.) bu T9
+            # kurali tarafindan yakalanmasin, TANK BASINC RAPORU kurali yakalasin.
+            ("INSPECTION CERTIFICATE" in m and ("TANK" in m or "CONTAINER" in m or "ADR" in m)
+             and not ("TANK CONTAINER" in m and ("PORTABLE TANK" in m or
+                      "INITIAL INSPECTION CERTIFICATE" in m or
+                      "PERIODIC INSPECTION REPORT" in m or
+                      "LLOYD" in m or "BUREAU VERITAS" in m or
+                      "NEW CONSTRUCTION" in m))) or
             ("T9" in m and ("ADR" in m or "ONAY SERTIFIKA" in m or "ONAY SERTİFİKA" in m or
                               "UYGUNLUK BELGE" in m or "APPROVAL" in m))):
             return "T9"
@@ -726,11 +784,11 @@ def belge_turu_dosya_adindan(dosya_adi):
 # ----------------------------------------------------------------------------
 def klasorleri_hazirla(ana_klasor):
     ana = Path(ana_klasor)
-    arsiv = ana / "PREGATE ARSIV"
-    arsiv.mkdir(exist_ok=True)
+    # Alt klasorler dogrudan ana (secilen Taramalar) klasorune acilir,
+    # araya "PREGATE ARSIV" eklenmez.
+    arsiv = ana
     for klasor in BELGE_KLASORLERI.values():
         (arsiv / klasor).mkdir(exist_ok=True)
-    # PREGATE_ARSIV disindaki klasorler
     for d in ("FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI"):
         (ana / d).mkdir(exist_ok=True)
     return arsiv

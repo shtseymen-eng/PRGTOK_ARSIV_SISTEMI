@@ -63,14 +63,21 @@ jobs:
         shell: cmd
         run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\kurulum.iss"'
 
-      - name: Upload Setup
-        uses: actions/upload-artifact@v4
-        with:
-          name: PRGTOK_Kurulum_Sihirbazi
-          path: installer/cikti/PRGTOK_Arsiv_Kurulum.exe
+      - name: Surum numarasini oku
+        id: version
+        shell: pwsh
+        run: |
+          $ver = python -c "import re; content=open('motor.py').read(); print(re.search(r'SURUM\s*=\s*\"([^\"]+)\"', content).group(1))"
+          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
 
-      - name: Upload EXE
+      - name: Upload Setup (Artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: PRGTOK_EXE
+          name: PRGTOK_Kurulum_v${{ steps.version.outputs.VERSION }}
+          path: installer/cikti/PRGTOK_Arsiv_Kurulum_v${{ steps.version.outputs.VERSION }}.exe
+
+      - name: Upload EXE (Artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: PRGTOK_EXE_v${{ steps.version.outputs.VERSION }}
           path: dist/PRGTOK_ARSIV_SISTEMI.exe

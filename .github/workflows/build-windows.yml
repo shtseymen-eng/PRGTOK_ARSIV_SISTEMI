@@ -24,8 +24,7 @@ jobs:
         run: |
           choco install tesseract -y --no-progress
           refreshenv
-          echo "Tesseract installed at:"
-          dir "C:\Program Files\Tesseract-OCR\"
+          echo "Tesseract installed"
 
       - name: Install Turkish language for Tesseract
         run: |
@@ -39,7 +38,6 @@ jobs:
           $url = "https://github.com/oschwartz10612/poppler-windows/releases/download/v24.08.0-0/Release-24.08.0-0.zip"
           Invoke-WebRequest -Uri $url -OutFile "poppler.zip"
           Expand-Archive poppler.zip -DestinationPath "C:\pop" -Force
-          dir "C:\pop"
 
       - name: Build EXE with PyInstaller
         shell: cmd
@@ -67,8 +65,11 @@ jobs:
         id: version
         shell: pwsh
         run: |
-          $ver = python -c "import re; content=open('motor.py').read(); print(re.search(r'SURUM\s*=\s*\"([^\"]+)\"', content).group(1))"
+          $content = Get-Content motor.py -Raw -Encoding UTF8
+          $match = [regex]::Match($content, 'SURUM = "([0-9.]+)"')
+          $ver = if ($match.Success) { $match.Groups[1].Value } else { "2.4.0" }
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+          echo "Surum: $ver"
 
       - name: Upload Setup (Artifact)
         uses: actions/upload-artifact@v4

@@ -88,7 +88,7 @@ try:
 except Exception:
     OCR_KULLANILABILIR = False
 
-SURUM = "2.5.0"
+SURUM = "2.5.1"
 
 # ----------------------------------------------------------------------------
 # ISLEM KODLARI
@@ -136,6 +136,29 @@ TUR_DISPLAY = {
 
 # Eski T9 alt-tur adlarini yeni birlesik "T9" turune yonlendirmek icin
 ESKI_T9_TURLERI = {"T9 GECICI", "T9 MUAYENE", "T9 ANA", "T9 MUAYENE SERTIFIKASI"}
+
+
+# ----------------------------------------------------------------------------
+# KULLANICI TARAFINDAN ELLE OLUSTURULMUS, PROGRAMIN HIC DOKUNMAMASI GEREKEN
+# KLASORLER
+#
+# Kullanici, arsivleme mantigi programdan tamamen farkli olan kendi klasorlerini
+# (ör. "Kontrol Formu") ana klasorun altina acabilir. Bu klasorler asagidaki
+# listeye eklenir; tarama (klasor_tara / tum_dosyalari_yeniden_tara) bu
+# klasorlerin ICINE HIC GIRMEZ: ne icindeki dosyalari baska yere tasir, ne de
+# disaridan bu klasore dosya sokar. Karsilastirma buyuk/kucuk harf ve Turkce
+# karakter farkina duyarsizdir (kullanici "Kontrol Formu", "KONTROL FORMU"
+# ya da "kontrol formu" yazsa da ayni klasor olarak taninir).
+# ----------------------------------------------------------------------------
+KULLANICI_KORUMALI_KLASORLER = {"KONTROL FORMU"}
+
+
+def _klasor_adi_normalize(text):
+    """Klasor adlarini buyuk/kucuk harf ve Turkce karakter farkina duyarsiz
+    sekilde karsilastirmak icin kullanilir (sadece karsilastirma amacli;
+    diskteki gercek klasor adi degistirilmez)."""
+    tr_map = str.maketrans("ığüşöçİĞÜŞÖÇ", "igusocIGUSOC")
+    return str(text).translate(tr_map).upper().strip()
 
 # Dosya adindan tur tespiti icin ters-arama tablosu (kisa etiket -> tur)
 TUR_DISPLAY_REVERSE = {v: k for k, v in TUR_DISPLAY.items()}
@@ -1169,16 +1192,20 @@ def klasor_tara(ana_klasor, log_callback=None, progress_callback=None):
     # (os.walk bu klasorlerde asagi inmez), sadece ana klasorun kendisinde
     # (ve taninmayan/yeni herhangi bir alt klasorde) duran, henuz
     # siniflandirilmamis dosyalari islemeye alir.
-    ATLA_KLASORLER = (
-        set(BELGE_KLASORLERI.values())
-        | {"FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI"}
-        | ESKI_T9_TURLERI
-    )
+    ATLA_KLASORLER = {
+        _klasor_adi_normalize(x)
+        for x in (
+            set(BELGE_KLASORLERI.values())
+            | {"FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI"}
+            | ESKI_T9_TURLERI
+            | KULLANICI_KORUMALI_KLASORLER
+        )
+    }
 
     dosya_listesi = []
     for root, dirs, files in os.walk(ana):
         root_path = Path(root)
-        if any(p in ATLA_KLASORLER for p in root_path.parts):
+        if any(_klasor_adi_normalize(p) in ATLA_KLASORLER for p in root_path.parts):
             dirs[:] = []
             continue
         for file in files:
@@ -1298,12 +1325,17 @@ def tum_dosyalari_yeniden_tara(ana_klasor, log_callback=None, progress_callback=
     sonuclar = []
     ozel_kelimeler = anahtar_kelimeleri_oku(ana_klasor)
 
-    ATLA_KLASORLER = {"FARKLI FORMAT DOSYALAR", "ISLEM RAPORLARI"}
+    ATLA_KLASORLER = {
+        _klasor_adi_normalize(x)
+        for x in (
+            {"FARKLI FORMAT DOSYALAR", "ISLEM RAPORLARI"} | KULLANICI_KORUMALI_KLASORLER
+        )
+    }
 
     dosya_listesi = []
     for root, dirs, files in os.walk(ana):
         root_path = Path(root)
-        if any(p in ATLA_KLASORLER for p in root_path.parts):
+        if any(_klasor_adi_normalize(p) in ATLA_KLASORLER for p in root_path.parts):
             dirs[:] = []
             continue
         for file in files:

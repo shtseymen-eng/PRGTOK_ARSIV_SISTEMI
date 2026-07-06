@@ -12,6 +12,27 @@ Sürümleme: `MAJOR.MINOR.PATCH`
 
 ----------------------------------------------------------------------
 
+## v2.5.1 — "Kontrol Formu" (ve benzeri kullanıcı klasörleri) Taramadan Tamamen Muaf
+
+**Tarih:** 2026-07-06
+
+- Kullanıcı, arşivleme mantığı program tarafından yönetilmeyen kendi klasörünü
+  ("Kontrol Formu") ana klasörün altına açabiliyor. Artık hem normal
+  taramada (`klasor_tara`) hem de "Tümünü Yeniden Tara"da
+  (`tum_dosyalari_yeniden_tara`) bu klasörün İÇİNE HİÇ GİRİLMİYOR: içindeki
+  dosyalar başka yere taşınmıyor, dışarıdan da bu klasöre hiçbir dosya
+  eklenmiyor. Klasörün kendi iç düzeni (alt klasörler, isimlendirme vb.)
+  tamamen olduğu gibi korunuyor.
+- Karşılaştırma büyük/küçük harf ve Türkçe karakter farkına duyarsız
+  (`_klasor_adi_normalize`) yapıldı; kullanıcı klasörü "Kontrol Formu",
+  "KONTROL FORMU" ya da "kontrol formu" olarak adlandırsa da aynı şekilde
+  tanınıp atlanıyor.
+- Bu koruma, `KULLANICI_KORUMALI_KLASORLER` adlı tek bir listede tutuluyor;
+  ileride benzer başka "programın karışmaması gereken" klasörler eklenmek
+  istenirse tek satırla genişletilebilir.
+
+----------------------------------------------------------------------
+
 ## v2.5.0 — Günlük Tarama Artık Sadece Yeni Dosyaları Kontrol Ediyor, Manuel Düzeltmede Eski Etiket Temizliği
 
 **Tarih:** 2026-07-06

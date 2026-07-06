@@ -88,7 +88,7 @@ try:
 except Exception:
     OCR_KULLANILABILIR = False
 
-SURUM = "2.4.0"
+SURUM = "2.5.0"
 
 # ----------------------------------------------------------------------------
 # ISLEM KODLARI
@@ -1145,13 +1145,35 @@ def ana_klasor_path(ana_klasor):
 # ----------------------------------------------------------------------------
 def klasor_tara(ana_klasor, log_callback=None, progress_callback=None):
     """progress_callback(islenen, toplam) seklinde cagrilir; arayuzde
-    ilerleme cubugu / 'X/Y dosya islendi' bilgisini gostermek icin kullanilir."""
+    ilerleme cubugu / 'X/Y dosya islendi' bilgisini gostermek icin kullanilir.
+
+    GUNLUK / HIZLI TARAMA: Bu fonksiyon artik SADECE henuz siniflandirilmamis
+    (Taramalar ana klasorune duz/loose olarak dusen) yeni dosyalari kontrol
+    eder. Zaten siniflandirilmis oldugu bilinen arsiv klasorlerinin (T9,
+    TANK BASINC RAPORU, OKUNAMAYAN PDF, ISLEM RAPORLARI, vb.) ICINE HIC
+    GIRILMEZ; bu yuzden arsivde binlerce klasor/dosya birikmis olsa bile
+    tarama suresi sadece o gun eklenen yeni dosya sayisina baglidir, arsivin
+    toplam buyuklugune degil.
+
+    Zaten siniflandirilmis TUM dosyalarin icerigini/yerini yeniden kontrol
+    etmek icin (ornegin dosyalar elle yanlis klasore tasindiysa) ayri ve
+    bilerek tetiklenen `tum_dosyalari_yeniden_tara()` fonksiyonu kullanilir
+    (arayuzde 'Tumunu Yeniden Tara' butonu - bunun uzun surecegi konusunda
+    kullaniciya ayrica uyari gosterilir)."""
     arsiv = klasorleri_hazirla(ana_klasor)
     sonuclar = []
     ana = Path(ana_klasor)
 
-    # Tarama sirasinda atlanan ozel klasorler
-    ATLA_KLASORLER = {"OKUNAMAYAN PDF", "ISLEM RAPORLARI"}
+    # Tarama sirasinda atlanan klasorler: TUM bilinen/siniflandirilmis arsiv
+    # klasorleri + sistem klasorleri. Gunluk tarama bunlarin ICINE HIC GIRMEZ
+    # (os.walk bu klasorlerde asagi inmez), sadece ana klasorun kendisinde
+    # (ve taninmayan/yeni herhangi bir alt klasorde) duran, henuz
+    # siniflandirilmamis dosyalari islemeye alir.
+    ATLA_KLASORLER = (
+        set(BELGE_KLASORLERI.values())
+        | {"FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI"}
+        | ESKI_T9_TURLERI
+    )
 
     dosya_listesi = []
     for root, dirs, files in os.walk(ana):
@@ -1405,7 +1427,11 @@ def tum_dosyalari_yeniden_tara(ana_klasor, log_callback=None, progress_callback=
 # ----------------------------------------------------------------------------
 def ozet_sayilar(ana_klasor):
     ana = Path(ana_klasor)
-    arsiv = ana / "PREGATE ARSIV"
+    # v2.4.0'dan itibaren alt klasorler dogrudan ana klasorun altinda
+    # (araya "PREGATE ARSIV" girmiyor). Bu fonksiyon eski yapiyi arıyordu ve
+    # bu yuzden dashboard'daki kategori sayaclari v2.4.0'dan beri hep 0/yanlis
+    # gosteriyordu; duzeltildi.
+    arsiv = ana
     ozet = {"TOPLAM": 0}
 
     for tur, klasor_adi in BELGE_KLASORLERI.items():

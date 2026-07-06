@@ -12,6 +12,50 @@ Sürümleme: `MAJOR.MINOR.PATCH`
 
 ----------------------------------------------------------------------
 
+## v2.5.0 — Günlük Tarama Artık Sadece Yeni Dosyaları Kontrol Ediyor, Manuel Düzeltmede Eski Etiket Temizliği
+
+**Tarih:** 2026-07-06
+
+**Değişiklik 1 — Normal ("Tara") taraması artık arşivin tamamını değil,
+sadece yeni/sınıflandırılmamış dosyaları kontrol ediyor:**
+- Önceden `klasor_tara()` her çalıştığında ana klasörün TÜM alt ağacını
+  (T9, TANK BASINC RAPORU, OKUNAMAYAN PDF gibi zaten sınıflandırılmış
+  binlerce klasör dahil) `os.walk` ile geziyordu. Arşiv büyüdükçe (13.000+
+  klasör/dosya) bu, her "Tara" tıklamasında pratikte tüm arşivin yeniden
+  taranması anlamına geliyordu.
+- Artık `ATLA_KLASORLER` listesi, bilinen TÜM sınıflandırılmış arşiv
+  klasörlerini (BELGE_KLASORLERI + FARKLI FORMAT DOSYALAR + OKUNAMAYAN PDF +
+  ISLEM RAPORLARI + eski T9 alt klasörleri) içerecek şekilde genişletildi.
+  `os.walk` artık bu klasörlerin İÇİNE HİÇ GİRMİYOR; sadece ana klasöre
+  düz (loose) düşen, henüz sınıflandırılmamış günlük tarama dosyalarını
+  işliyor. Tarama süresi artık arşivin toplam büyüklüğüne değil, o gün
+  eklenen yeni dosya sayısına bağlı.
+- Tüm arşivi içerikten yeniden okuyup kontrol etmek gerekiyorsa (örn. dosyalar
+  elle yanlış klasöre taşındıysa) hâlâ ayrı ve bilerek tetiklenen
+  "Tümünü Yeniden Tara" (`tum_dosyalari_yeniden_tara`) kullanılabilir; bu
+  fonksiyon değişmedi ve uzun sürebileceği konusunda kullanıcı zaten
+  uyarılıyor.
+
+**Değişiklik 2 — Manuel Düzeltme aracı artık eski/geçersiz klasör
+etiketlerini otomatik temizliyor ve dosya adını seçilen türle uyumlu hale
+getiriyor:**
+- Manuel Düzeltme ile bir belge düzeltilirken, dosya adında önceden kalmış
+  "OKUNAMAYAN", "OKUNAMAYAN PDF", "FARKLI FORMAT DOSYALAR" gibi eski
+  klasör/durum etiketleri ya da yanlış seçilmiş eski bir belge türü adı
+  varsa, bunlar artık otomatik olarak isimden siliniyor
+  (`strip_stale_markers`). Az önce seçilen doğru tür etiketi silinmiyor.
+- Kaydedilen dosya adı, kullanıcının yazdığı isim + az önce seçilen belge
+  türü etiketini (isimde zaten yoksa) otomatik içerecek şekilde
+  oluşturuluyor; böylece isim her zaman gerçek sınıflandırmayla uyumlu.
+- Ayrıca, Manuel Düzeltme aracının dosyaları kaydettiği hedef klasör
+  düzeltildi: önceden `PREGATE ARSIV/<TÜR>` alt yapısı kullanılıyordu, bu da
+  v2.4.0'da ana tarama motorunda kaldırılan katmanı burada tekrar
+  oluşturup elle düzeltilen dosyaların ana arşivden ayrı, görünmeyen bir
+  kopya ağacında kalmasına yol açıyordu. Artık iki araç da AYNI (doğrudan
+  ana klasör altındaki) klasör yapısını kullanıyor.
+
+----------------------------------------------------------------------
+
 ## v2.4.0 — LR/BV Tank Basınç Desteği, Klasör Yapısı ve OCR Konsol Düzeltmesi
 
 **Tarih:** 2026-06-24

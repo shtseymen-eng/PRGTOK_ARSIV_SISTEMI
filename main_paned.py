@@ -135,6 +135,52 @@ def ensure_e_suffix(stem: str) -> str:
     return f"{stem} E"
 
 
+# Manuel duzeltmeden gecen bir dosyada artik anlamsiz kalan eski klasor/durum
+# etiketleri (ör. dosya bir zamanlar OKUNAMAYAN PDF klasorune dusmus, ya da
+# yanlislikla baska bir turde siniflandirilmis olabilir). Kullanici belgeyi
+# elle duzeltip yeni turunu sectiginde bu eski etiketler isimde kalmamali;
+# isim sadece kullanicinin yazdigi metin + az once secilen dogru tur olmali.
+STALE_MARKER_TOKENS = (
+    list(UNREAD_FOLDER_CANDIDATES)
+    + ["FARKLI FORMAT DOSYALAR", "ISLEM RAPORLARI", "PREGATE ARSIV"]
+    + list(DOCUMENT_TYPES.keys())
+)
+
+
+def strip_stale_markers(stem: str, keep_label: str = "") -> str:
+    """Dosya adindan, artik gecerli olmayan eski klasor/tur etiketlerini
+    (ör. 'OKUNAMAYAN', 'OKUNAMAYAN PDF', 'FARKLI FORMAT DOSYALAR', ya da
+    daha once secilmis baska bir belge turu adi) temizler.
+
+    keep_label verildiyse (kullanicinin AZ ONCE sectigi yeni belge turu),
+    o etiket burada silinmez - zaten dogru oldugu icin dokunulmaz."""
+    if not stem:
+        return stem
+
+    keep_norm = normalize_text(keep_label) if keep_label else ""
+    cleaned = stem
+
+    for token in STALE_MARKER_TOKENS:
+        token_norm = normalize_text(token)
+        if keep_norm and token_norm == keep_norm:
+            continue
+        # Bosluk / alt cizgi / tire farketmeksizin, harf harf ayni token'i yakala
+        # (token icindeki bosluklari esnek bir ayrac sinifiyla degistiriyoruz;
+        # bunu re.sub(replace=...) yerine str.join ile yapiyoruz, cunku
+        # replace metninde "\s" gibi kaliplar re.sub tarafindan yanlislikla
+        # backreference gibi yorumlanip hataya yol aciyordu).
+        token_parts = [re.escape(p) for p in token.split()]
+        token_pattern = r"[\s_\-]+".join(token_parts) if token_parts else re.escape(token)
+        pattern = re.compile(
+            r"(?<![A-Za-z0-9])" + token_pattern + r"(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        )
+        cleaned = pattern.sub(" ", cleaned)
+
+    cleaned = re.sub(r"[\s_\-]+", " ", cleaned).strip(" _-")
+    return cleaned
+
+
 def unique_path(target: Path) -> Path:
     if not target.exists():
         return target
@@ -768,6 +814,7 @@ class ManualCorrectionApp:
         self.old_name_var.set(file_path.name)
 
         clean_initial = re.sub(r"(_PRGTOK|_P|_E)$", "", file_path.stem, flags=re.IGNORECASE)
+        clean_initial = strip_stale_markers(clean_initial)
         self.new_name_var.set(clean_initial)
         self.doc_type_var.set("")
 
@@ -897,8 +944,13 @@ class ManualCorrectionApp:
         self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
 
     def target_folder_for_doc_type(self, doc_type: str) -> Path:
+        # v2.4.0'dan itibaren ana tarama motoru alt klasorleri dogrudan secilen
+        # ana klasorun altina aciyor (araya "PREGATE ARSIV" eklemiyor). Manuel
+        # duzeltme araci da AYNI klasor yapisini kullanmali; aksi halde
+        # duzeltilen dosyalar ana arsivden ayri, gorunmeyen bir "PREGATE ARSIV"
+        # kopya agacinda kalir.
         folder_name = DOCUMENT_TYPES.get(doc_type, "DIGER BELGELER")
-        target = self.root_folder / "PREGATE ARSIV" / folder_name
+        target = self.root_folder / folder_name
         target.mkdir(parents=True, exist_ok=True)
         return target
 
@@ -923,6 +975,17 @@ class ManualCorrectionApp:
             return
 
         clean_stem = sanitize_filename(edited_name)
+
+        # Eski/artik gecersiz klasor-durum etiketlerini (OKUNAMAYAN vb.) sil;
+        # yeni secilen turu (doc_type) koru.
+        clean_stem = strip_stale_markers(clean_stem, keep_label=doc_type)
+
+        # Isim, secilen belge turunu icermiyorsa sona ekle - boylece kaydedilen
+        # dosya adi her zaman az once secilen turle uyumlu olur.
+        type_token = sanitize_filename(doc_type)
+        if normalize_text(type_token) not in normalize_text(clean_stem):
+            clean_stem = f"{clean_stem}_{type_token}" if clean_stem else type_token
+
         clean_stem = ensure_e_suffix(clean_stem)
 
         target_folder = self.target_folder_for_doc_type(doc_type)

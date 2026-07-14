@@ -100,27 +100,6 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def find_unread_folder(root_folder: Path):
-    """Var olan bir OKUNAMAYAN* klasoru varsa onu bulur. ARTIK BOYLE BIR
-    KLASOR YOKSA HICBIR SEY OLUSTURMAZ (eskiden yoksa "OKUNAMAYAN PDF"
-    klasoru otomatik olusturuluyordu; kullanici bunu istemiyor). Bulunamazsa
-    None doner."""
-    if not root_folder.exists():
-        return None
-
-    candidates = [normalize_text(x) for x in UNREAD_FOLDER_CANDIDATES]
-
-    for child in root_folder.iterdir():
-        if child.is_dir() and normalize_text(child.name) in candidates:
-            return child
-
-    for child in root_folder.iterdir():
-        if child.is_dir() and "OKUNAMAYAN" in normalize_text(child.name):
-            return child
-
-    return None
-
-
 # Manuel Duzeltme araci artik kullanicinin SECTIGI HERHANGI BIR klasoru
 # dogrudan gorunutuleyip icindeki dosyalarin adini/turunu duzeltebilir
 # (eskiden sadece "OKUNAMAYAN PDF" klasorune otomatik yonlendiriliyordu).

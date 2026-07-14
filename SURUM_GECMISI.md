@@ -12,6 +12,29 @@ Sürümleme: `MAJOR.MINOR.PATCH`
 
 ----------------------------------------------------------------------
 
+## v2.6.1 — Sol Menüde Üst Üste Binen Butonlar Düzeltildi, Manuel Düzeltme'de Ölü Kod Temizliği
+
+**Tarih:** 2026-07-14
+
+- v2.6.0'da sol menüye "🔒 Korumalı Klasörler" eklenince, menü listesi 6'dan
+  7 satıra çıktı ama altındaki "HIZLI İŞLEMLER" bölümü hâlâ eskisi gibi
+  sabit satır numarasında (9) kalmıştı — bu da "✏️ Manuel Düzeltme"
+  butonuyla "HIZLI İŞLEMLER" başlığının TAM ÜST ÜSTE binmesine yol açıyordu.
+  Tüm alt satırlar (HIZLI İŞLEMLER başlığı ve altındaki 5 buton) bir satır
+  aşağı kaydırıldı; ayrıca sidebar'a daha rahat sığması için buton
+  yükseklikleri ve boşlukları biraz küçültüldü.
+- Manuel Düzeltme aracında artık hiç çağrılmayan eski `find_unread_folder`
+  fonksiyonu (v2.6.0'da mantığı `set_root_folder`/`_bilinen_arsiv_klasoru_mu`
+  içine taşınmıştı) tamamen kaldırıldı; kod karışıklığı önlendi.
+- Not: v2.6.0 öncesi eski sürümde, Manuel Düzeltme'den T9 gibi bilinen bir
+  klasör doğrudan seçildiğinde, program o klasörün İÇİNE otomatik olarak
+  boş bir "OKUNAMAYAN PDF" alt klasörü oluşturup dosyaları ORADAN
+  listeye almaya çalışıyordu (dolayısıyla T9'un kendi dosyaları hiç
+  görünmüyordu). v2.6.0 bu davranışı tamamen kaldırdı. Eski sürümle
+  daha önce açılmış klasörlerde bu şekilde oluşmuş, içi boş "OKUNAMAYAN
+  PDF" alt klasörleri kalmış olabilir; bunlar elle silinebilir, program
+  bir daha böyle bir klasör oluşturmayacak.
+
 ## v2.6.0 — Korumalı Klasörler Artık Programdan Yönetilebiliyor, "Yenile" Taramayı Da Tetikliyor, Manuel Düzeltme Artık Zorla "OKUNAMAYAN" Klasörü Açıp Oluşturmuyor
 
 **Tarih:** 2026-07-14

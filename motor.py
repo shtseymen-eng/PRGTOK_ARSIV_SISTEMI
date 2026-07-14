@@ -88,7 +88,7 @@ try:
 except Exception:
     OCR_KULLANILABILIR = False
 
-SURUM = "2.6.0"
+SURUM = "2.6.1"
 
 # ----------------------------------------------------------------------------
 # ISLEM KODLARI

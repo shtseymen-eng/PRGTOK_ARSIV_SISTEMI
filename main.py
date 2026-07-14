@@ -145,42 +145,49 @@ class PRGTOKApp(ctk.CTk):
             ("🔒 Korumalı Klasörler", self.korumali_klasorler_penceresi_ac),
             ("✏️ Manuel Düzeltme", self.manuel_duzeltme_ac),
         ]
+        # NOT: menu 7 ogeye cikinca (Korumali Klasorler eklendi) asagidaki
+        # "HIZLI ISLEMLER" bolumu ile satir numaralari CAKISIYORDU (ikisi de
+        # eskiden row=9 kullaniyordu, bu yuzden butonlar ust uste biniyordu).
+        # Artik menu 3..9 arasi satirlari kullaniyor, "HIZLI ISLEMLER" ve
+        # altindaki butonlar 10'dan baslayacak sekilde kaydirildi. Ayrica
+        # butonlar biraz daha kompakt (kucuk yukseklik/bosluk) yapildi ki
+        # sidebar'a daha rahat sigsin.
         for i, (txt, cmd) in enumerate(menu, start=3):
             ctk.CTkButton(
-                self.sidebar, text=txt, anchor="w", height=34, font=("Arial", 12), command=cmd
-            ).grid(row=i, column=0, padx=14, pady=3, sticky="ew")
+                self.sidebar, text=txt, anchor="w", height=30, font=("Arial", 12), command=cmd
+            ).grid(row=i, column=0, padx=14, pady=2, sticky="ew")
 
         ctk.CTkLabel(
             self.sidebar, text="HIZLI İŞLEMLER", anchor="w", font=("Arial", 11, "bold"),
             text_color="#AFC3D5"
-        ).grid(row=9, column=0, padx=24, pady=(16, 4), sticky="ew")
+        ).grid(row=10, column=0, padx=24, pady=(10, 3), sticky="ew")
 
         ctk.CTkButton(
-            self.sidebar, text="📂 Klasör Seç", height=36, font=("Arial", 12), command=self.klasor_sec
-        ).grid(row=10, column=0, padx=16, pady=3, sticky="ew")
+            self.sidebar, text="📂 Klasör Seç", height=32, font=("Arial", 12), command=self.klasor_sec
+        ).grid(row=11, column=0, padx=16, pady=2, sticky="ew")
 
         self.btn_tara = ctk.CTkButton(
-            self.sidebar, text="🚀 Klasörü Tara (PDF)", height=36, font=("Arial", 12),
+            self.sidebar, text="🚀 Klasörü Tara (PDF)", height=32, font=("Arial", 12),
             fg_color="#0B7A32", hover_color="#0A632A", command=self.tara
         )
-        self.btn_tara.grid(row=11, column=0, padx=16, pady=3, sticky="ew")
+        self.btn_tara.grid(row=12, column=0, padx=16, pady=2, sticky="ew")
 
         self.btn_yenile = ctk.CTkButton(
-            self.sidebar, text="🔄 Yenile", height=32, font=("Arial", 12), fg_color="#27394A", command=self.yenile_ve_tara
+            self.sidebar, text="🔄 Yenile", height=30, font=("Arial", 12), fg_color="#27394A", command=self.yenile_ve_tara
         )
-        self.btn_yenile.grid(row=12, column=0, padx=16, pady=3, sticky="ew")
+        self.btn_yenile.grid(row=13, column=0, padx=16, pady=2, sticky="ew")
 
         self.btn_zorla = ctk.CTkButton(
-            self.sidebar, text="♻️ Okunamayanları Tekrar Dene", height=36, font=("Arial", 12),
+            self.sidebar, text="♻️ Okunamayanları Tekrar Dene", height=32, font=("Arial", 12),
             fg_color="#6B2F00", hover_color="#8B3D00", command=self.zorla_oku
         )
-        self.btn_zorla.grid(row=13, column=0, padx=16, pady=3, sticky="ew")
+        self.btn_zorla.grid(row=14, column=0, padx=16, pady=2, sticky="ew")
 
         self.btn_tumunu = ctk.CTkButton(
-            self.sidebar, text="🧠 Tümünü Yeniden Tara", height=36, font=("Arial", 12),
+            self.sidebar, text="🧠 Tümünü Yeniden Tara", height=32, font=("Arial", 12),
             fg_color="#5A1E8C", hover_color="#7327B0", command=self.tumunu_yeniden_tara
         )
-        self.btn_tumunu.grid(row=14, column=0, padx=16, pady=3, sticky="ew")
+        self.btn_tumunu.grid(row=15, column=0, padx=16, pady=2, sticky="ew")
 
         self.signature = ctk.CTkFrame(self.sidebar, fg_color="#06111D")
         self.signature.grid(row=21, column=0, padx=12, pady=(4, 8), sticky="sew")

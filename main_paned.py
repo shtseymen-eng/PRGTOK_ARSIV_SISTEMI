@@ -100,9 +100,13 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def find_unread_folder(root_folder: Path) -> Path:
+def find_unread_folder(root_folder: Path):
+    """Var olan bir OKUNAMAYAN* klasoru varsa onu bulur. ARTIK BOYLE BIR
+    KLASOR YOKSA HICBIR SEY OLUSTURMAZ (eskiden yoksa "OKUNAMAYAN PDF"
+    klasoru otomatik olusturuluyordu; kullanici bunu istemiyor). Bulunamazsa
+    None doner."""
     if not root_folder.exists():
-        return root_folder / "OKUNAMAYAN PDF"
+        return None
 
     candidates = [normalize_text(x) for x in UNREAD_FOLDER_CANDIDATES]
 
@@ -114,9 +118,48 @@ def find_unread_folder(root_folder: Path) -> Path:
         if child.is_dir() and "OKUNAMAYAN" in normalize_text(child.name):
             return child
 
-    unread = root_folder / "OKUNAMAYAN PDF"
-    unread.mkdir(parents=True, exist_ok=True)
-    return unread
+    return None
+
+
+# Manuel Duzeltme araci artik kullanicinin SECTIGI HERHANGI BIR klasoru
+# dogrudan gorunutuleyip icindeki dosyalarin adini/turunu duzeltebilir
+# (eskiden sadece "OKUNAMAYAN PDF" klasorune otomatik yonlendiriliyordu).
+# Kullanici bilinen/siniflandirilmis bir arsiv alt klasorunu (ör. T9,
+# OKUNAMAYAN PDF, FARKLI FORMAT DOSYALAR...) dogrudan secerse, duzeltilen
+# dosyalarin tasinacagi "ana arsiv klasoru" onun UST klasorudur; boylece
+# kategori klasorleri hep ayni yerde (Taramalar kokunde) kalir.
+BILINEN_ARSIV_KLASORLERI = (
+    set(DOCUMENT_TYPES.values())
+    | {"FARKLI FORMAT DOSYALAR", "ISLEM RAPORLARI"}
+    | set(UNREAD_FOLDER_CANDIDATES)
+)
+
+
+def _bilinen_arsiv_klasoru_mu(name: str) -> bool:
+    bilinen_normalize = {normalize_text(x) for x in BILINEN_ARSIV_KLASORLERI}
+    return normalize_text(name) in bilinen_normalize
+
+
+# Ana tarama motoruyla (motor.py) AYNI korumali klasor JSON dosyasini okur;
+# boylece kullanici "Korumali Klasorler" ekranindan ekledigi bir klasoru bu
+# Manuel Duzeltme aracindan da ACAMAZ / degistiremez. motor.py'nin agir
+# bagimliliklarini (pandas, pdfplumber, vb.) burada tekrar import etmemek
+# icin sadece JSON dosyasi kucuk ve bagimsiz bir sekilde okunuyor.
+_KORUMALI_KLASOR_VARSAYILAN = {"KONTROL FORMU", "KONTROL FORMLARI"}
+
+
+def _korumali_klasor_kumesi(archive_root: Path):
+    isimler = set(_KORUMALI_KLASOR_VARSAYILAN)
+    try:
+        yol = archive_root / "ISLEM RAPORLARI" / "KORUMALI KLASORLER.json"
+        if yol.exists():
+            with open(yol, "r", encoding="utf-8") as f:
+                veri = json.load(f)
+            if isinstance(veri, list):
+                isimler |= {str(x).strip() for x in veri if str(x).strip()}
+    except Exception:
+        pass
+    return {normalize_text(x) for x in isimler}
 
 
 def sanitize_filename(name: str) -> str:
@@ -211,7 +254,8 @@ class ManualCorrectionApp:
         self.settings = load_settings()
         root_value = self.settings.get("root_folder", "")
         self.root_folder = Path(root_value).expanduser() if root_value else None
-        self.unread_folder = None
+        self.archive_root = self.root_folder
+        self.browse_folder = None
         self.files = []
         self.filtered_files = []
         self.index = 0
@@ -682,39 +726,68 @@ class ManualCorrectionApp:
 
     def ask_root_folder(self):
         folder = filedialog.askdirectory(
-            title="PRGTOK ana klasörünü veya OKUNAMAYAN PDF klasörünü seç")
+            title="Düzeltmek istediğiniz klasörü seçin (ana klasör veya herhangi bir alt klasör)")
         if folder:
             self.set_root_folder(Path(folder))
 
     def set_root_folder(self, folder: Path):
+        """Kullanicinin secitigi klasoru DOGRUDAN gorunutuler; artik otomatik
+        olarak "OKUNAMAYAN PDF" gibi baska bir klasore yonlendirmez ve boyle
+        bir klasoru KESINLIKLE OLUSTURMAZ. Kullanici hangi klasoru secerse,
+        duzeltilecek dosyalar o klasorden listelenir."""
         normalized = normalize_text(folder.name)
 
-        if "OKUNAMAYAN" in normalized:
-            self.unread_folder = folder
-            self.root_folder = folder.parent
+        # Kategori klasorlerinin (T9, OKUNAMAYAN PDF, vb.) olusturulacagi
+        # "ana arsiv" klasoru: kullanici bilinen bir alt klasoru dogrudan
+        # sectiyse onun ust klasoru, degilse sectigi klasorun kendisi.
+        if _bilinen_arsiv_klasoru_mu(folder.name):
+            candidate_archive_root = folder.parent
         else:
-            self.root_folder = folder
-            self.unread_folder = find_unread_folder(folder)
+            candidate_archive_root = folder
 
-        self.settings["root_folder"] = str(self.root_folder)
+        korumali = _korumali_klasor_kumesi(candidate_archive_root)
+        if normalized in korumali:
+            messagebox.showwarning(
+                "Korumalı Klasör",
+                f"\"{folder.name}\" klasörü korumalı olarak işaretlenmiş.\n\n"
+                "Bu araçtan açılamaz; içeriği görüntülenemez, taşınamaz veya "
+                "değiştirilemez."
+            )
+            return
+
+        if _bilinen_arsiv_klasoru_mu(folder.name):
+            self.archive_root = folder.parent
+            self.browse_folder = folder
+        else:
+            self.archive_root = folder
+            self.browse_folder = folder
+
+        self.root_folder = self.archive_root
+
+        self.settings["root_folder"] = str(self.archive_root)
         save_settings(self.settings)
 
-        self.folder_label.config(text=f"Ana klasör: {self.root_folder}")
-        self.unread_label.config(text=str(self.unread_folder))
+        self.folder_label.config(text=f"Ana klasör: {self.archive_root}")
+        self.unread_label.config(text=f"Görüntülenen klasör: {self.browse_folder}")
 
         self.refresh_files()
 
     def refresh_files(self):
-        if not self.root_folder:
+        """SADECE su an gorunutulenen (self.browse_folder) klasordeki
+        dosyalari listeler; baska hicbir klasoru taramaz, otomatik
+        olusturmaz ya da acmaz."""
+        if not self.browse_folder:
+            self.files = []
+            self.apply_filter(reset_index=True)
             return
 
-        if self.unread_folder is None or not self.unread_folder.exists():
-            self.unread_folder = find_unread_folder(self.root_folder)
-
-        self.unread_label.config(text=str(self.unread_folder))
+        if not self.browse_folder.exists():
+            self.files = []
+            self.apply_filter(reset_index=True)
+            return
 
         self.files = sorted([
-            p for p in self.unread_folder.iterdir()
+            p for p in self.browse_folder.iterdir()
             if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
         ])
 

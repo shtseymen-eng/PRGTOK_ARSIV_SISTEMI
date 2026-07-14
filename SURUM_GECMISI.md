@@ -12,6 +12,60 @@ Sürümleme: `MAJOR.MINOR.PATCH`
 
 ----------------------------------------------------------------------
 
+## v2.6.0 — Korumalı Klasörler Artık Programdan Yönetilebiliyor, "Yenile" Taramayı Da Tetikliyor, Manuel Düzeltme Artık Zorla "OKUNAMAYAN" Klasörü Açıp Oluşturmuyor
+
+**Tarih:** 2026-07-14
+
+**Değişiklik 1 — "Kontrol Formları" (çoğul) da varsayılan korumalı klasör oldu:**
+- v2.5.1'de sadece "Kontrol Formu" (tekil) korumalıydı. Kullanıcının asıl
+  klasör adı "Kontrol Formları" (çoğul) olduğu için tam eşleşmiyordu. Artık
+  `VARSAYILAN_KULLANICI_KORUMALI_KLASORLER = {"KONTROL FORMU", "KONTROL FORMLARI"}`
+  olarak her iki ad da varsayılan olarak korunuyor.
+
+**Değişiklik 2 — Korumalı klasör listesi artık kod değiştirmeden, programın
+içinden yönetilebiliyor:**
+- Yeni "🔒 Korumalı Klasörler" ekranı eklendi (Anahtar Kelimeler ekranıyla
+  aynı mantıkta). Kullanıcı buradan istediği kadar ek klasör adı ekleyip
+  çıkarabilir; varsayılan iki isim ("KONTROL FORMU", "KONTROL FORMLARI")
+  her zaman korumalı kalır ve silinemez.
+- Bu liste seçili ana klasöre özel olarak `ISLEM RAPORLARI/KORUMALI
+  KLASORLER.json` dosyasında saklanır (`korumali_klasorleri_oku` /
+  `korumali_klasor_ekle` / `korumali_klasor_sil`). `klasor_tara` ve
+  `tum_dosyalari_yeniden_tara` artık bu dinamik listeyi okuyup atlanacak
+  klasörlere ekliyor; korumalı bir klasörün İÇİNE hiç girilmiyor (ne
+  taşıma, ne ekleme, ne silme — tamamen dokunulmuyor), alt klasörleri de
+  dahil.
+
+**Değişiklik 3 — "🔄 Yenile" butonu artık sadece ekrandaki sayıları değil,
+gerçek taramayı da tetikliyor:**
+- Önceden "Yenile" sadece özet panelindeki sayıları (daha önceki tarama
+  sonuçlarından) yeniden okuyordu; hiçbir dosya taramıyordu. Artık "Yenile",
+  "Klasörü Tara" ile birebir aynı işlemi (`klasor_tara`) çalıştırıyor: SADECE
+  ana klasöre düz (loose) düşen, henüz sınıflandırılmamış yeni PDF'leri
+  kontrol ediyor — bilinen/sınıflandırılmış klasörlerin (T9, TANK BASINÇ
+  RAPORU, OKUNAMAYAN PDF, korumalı klasörler, vb.) İÇİNE HİÇ GİRMİYOR. Bu
+  yüzden arşiv ne kadar büyük olursa olsun "Yenile" süresi sadece o gün
+  eklenen yeni dosya sayısına bağlı kalıyor, tüm arşivin yeniden taranması
+  gerekmiyor.
+
+**Değişiklik 4 — Manuel Düzeltme aracı artık otomatik olarak "OKUNAMAYAN
+PDF" gibi bir klasör açmıyor / oluşturmuyor:**
+- Önceden hangi klasör seçilirse seçilsin, araç otomatik olarak bir
+  "OKUNAMAYAN*" klasörü arıyor, bulamazsa "OKUNAMAYAN PDF" adında YENİ BİR
+  KLASÖR OLUŞTURUYORDU. Artık böyle bir klasör asla otomatik oluşturulmuyor.
+- Araç artık kullanıcının "📂 Ana Klasör Seç" ile SEÇTİĞİ klasörü DOĞRUDAN
+  gösterir; kullanıcı hangi klasöre girerse (T9, OKUNAMAYAN PDF, ana klasörün
+  kendisi, vb.) orada yanlış yazılmış dosya adlarını düzeltebilir. Düzeltilen
+  dosyanın taşınacağı kategori klasörleri yine her zaman doğru ana arşiv
+  kökünde oluşturuluyor (bilinen bir alt klasör doğrudan seçildiyse kök,
+  onun üst klasörü olarak otomatik belirlenir).
+- Manuel Düzeltme aracı da artık korumalı klasör listesini (yukarıdaki JSON)
+  kontrol ediyor: kullanıcı korumalı bir klasörü (ör. "Kontrol Formları")
+  bu araçtan açmaya çalışırsa uyarı verilip açılmıyor — bu klasörler hiçbir
+  araçtan değiştirilemez.
+
+----------------------------------------------------------------------
+
 ## v2.5.1 — "Kontrol Formu" (ve benzeri kullanıcı klasörleri) Taramadan Tamamen Muaf
 
 **Tarih:** 2026-07-06

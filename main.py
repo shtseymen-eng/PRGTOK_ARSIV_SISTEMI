@@ -39,6 +39,10 @@ from motor import (
     anahtar_kelimeleri_oku,
     anahtar_kelime_ekle,
     anahtar_kelime_sil,
+    VARSAYILAN_KULLANICI_KORUMALI_KLASORLER,
+    korumali_klasorleri_oku,
+    korumali_klasor_ekle,
+    korumali_klasor_sil,
 )
 
 ctk.set_appearance_mode("dark")
@@ -138,6 +142,7 @@ class PRGTOKApp(ctk.CTk):
             ("🔎 Arama", self.arama_toggle),
             ("📊 İşlem Raporları", self.rapor_bilgi),
             ("🔑 Anahtar Kelimeler", self.anahtar_kelimeler_penceresi_ac),
+            ("🔒 Korumalı Klasörler", self.korumali_klasorler_penceresi_ac),
             ("✏️ Manuel Düzeltme", self.manuel_duzeltme_ac),
         ]
         for i, (txt, cmd) in enumerate(menu, start=3):
@@ -161,7 +166,7 @@ class PRGTOKApp(ctk.CTk):
         self.btn_tara.grid(row=11, column=0, padx=16, pady=3, sticky="ew")
 
         self.btn_yenile = ctk.CTkButton(
-            self.sidebar, text="🔄 Yenile", height=32, font=("Arial", 12), fg_color="#27394A", command=self.ozet_yenile
+            self.sidebar, text="🔄 Yenile", height=32, font=("Arial", 12), fg_color="#27394A", command=self.yenile_ve_tara
         )
         self.btn_yenile.grid(row=12, column=0, padx=16, pady=3, sticky="ew")
 
@@ -451,6 +456,15 @@ class PRGTOKApp(ctk.CTk):
             self.tablo_doldur(df.tail(300))
 
         self._arka_planda_calistir(is_yap, bitince)
+
+    def yenile_ve_tara(self):
+        """'Yenile' butonu artık sadece ekrandaki özet sayılarını değil,
+        yeni/henüz sınıflandırılmamış (bilinen kategori klasörlerinin VE
+        korumalı klasörlerin İÇİNDE OLMAYAN, ana klasöre düz düşen) PDF
+        dosyalarını da tarar — tıpkı 'Klasörü Tara' butonu gibi. Zaten
+        sınıflandırılmış binlerce dosya/klasörün İÇİNE HİÇ GİRİLMEZ, bu
+        yüzden arşiv büyük olsa da bu işlem hızlı kalır."""
+        self.tara()
 
     def ara(self):
         yol = self.ana_klasor.get()
@@ -754,6 +768,117 @@ class PRGTOKApp(ctk.CTk):
     def _anahtar_kelime_sil_ve_yenile(self, kategori, kelime):
         anahtar_kelime_sil(self._ak_klasor, kategori, kelime)
         self._anahtar_kelimeler_listesini_ciz()
+
+
+    # ------------------------------------------------------------------
+    # KORUMALI KLASORLER YONETIMI
+    # ------------------------------------------------------------------
+    def korumali_klasorler_penceresi_ac(self):
+        yol = self.ana_klasor.get()
+        if not os.path.isdir(yol):
+            messagebox.showwarning(
+                "Klasör seç", "Önce ana klasörü seç. Korumalı klasörler seçili klasöre özeldir."
+            )
+            return
+
+        pencere = Toplevel(self)
+        pencere.title("Korumalı Klasörler")
+        pencere.geometry("760x560")
+        pencere.configure(bg=RENK_ANA_ARKA)
+        pencere.transient(self)
+
+        ctk.CTkLabel(
+            pencere, text="Korumalı Klasörler", font=("Arial", 18, "bold")
+        ).pack(padx=16, pady=(16, 4), anchor="w")
+        ctk.CTkLabel(
+            pencere,
+            text=(
+                "Buradaki klasörlerin (ve tüm alt klasörlerinin) İÇİNE program "
+                "kesinlikle girmez: ne tarama sırasında içindeki dosyaları başka "
+                "yere taşır, ne de dışarıdan bu klasöre bir dosya ekler. Klasörün "
+                "kendi iç düzeni olduğu gibi korunur. Varsayılan klasörler her "
+                "zaman korumalıdır ve silinemez; alta kendi klasör adınızı "
+                "ekleyip istediğiniz zaman kaldırabilirsiniz. Bu liste seçili "
+                "ana klasöre özeldir."
+            ),
+            font=("Arial", 11), text_color="#7FA8C9", wraplength=700, justify="left"
+        ).pack(padx=16, pady=(0, 12), anchor="w")
+
+        scroll = ctk.CTkScrollableFrame(pencere, fg_color="transparent")
+        scroll.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        scroll.grid_columnconfigure(0, weight=1)
+
+        self._kk_pencere = pencere
+        self._kk_scroll = scroll
+        self._kk_klasor = yol
+        self._korumali_klasorler_listesini_ciz()
+
+        ctk.CTkButton(
+            pencere, text="Kapat", command=pencere.destroy, fg_color="#5A1E1E", hover_color="#7A2A2A"
+        ).pack(padx=16, pady=(0, 16), anchor="e")
+
+    def _korumali_klasorler_listesini_ciz(self):
+        """Korumalı klasörler penceresinin içeriğini (varsayılanlar + kullanıcı
+        eklediği özel klasörler) sıfırdan yeniden çizer. Ekleme/silme sonrası
+        tekrar çağrılır."""
+        for w in self._kk_scroll.winfo_children():
+            w.destroy()
+
+        _, ozel = korumali_klasorleri_oku(self._kk_klasor)
+
+        kutu_varsayilan = ctk.CTkFrame(self._kk_scroll, fg_color=RENK_KART, corner_radius=10)
+        kutu_varsayilan.grid(row=0, column=0, padx=4, pady=6, sticky="ew")
+        kutu_varsayilan.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            kutu_varsayilan, text="Varsayılan (her zaman korumalı, silinemez)",
+            font=("Arial", 13, "bold"), text_color="#DCEBFF"
+        ).grid(row=0, column=0, padx=12, pady=(10, 4), sticky="w")
+        for j, isim in enumerate(sorted(VARSAYILAN_KULLANICI_KORUMALI_KLASORLER)):
+            ctk.CTkLabel(kutu_varsayilan, text=f"• {isim}", font=("Arial", 12)).grid(
+                row=1 + j, column=0, padx=(20, 12), pady=(2, 8 if j == len(VARSAYILAN_KULLANICI_KORUMALI_KLASORLER) - 1 else 2), sticky="w"
+            )
+
+        kutu_ozel = ctk.CTkFrame(self._kk_scroll, fg_color=RENK_KART, corner_radius=10)
+        kutu_ozel.grid(row=1, column=0, padx=4, pady=6, sticky="ew")
+        kutu_ozel.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            kutu_ozel, text="Sizin eklediğiniz ek klasörler", font=("Arial", 13, "bold"), text_color="#DCEBFF"
+        ).grid(row=0, column=0, columnspan=2, padx=12, pady=(10, 4), sticky="w")
+
+        if ozel:
+            for j, isim in enumerate(ozel):
+                ctk.CTkLabel(kutu_ozel, text=f"• {isim}", font=("Arial", 12)).grid(
+                    row=1 + j, column=0, padx=(20, 6), pady=2, sticky="w"
+                )
+                ctk.CTkButton(
+                    kutu_ozel, text="Sil", width=56, height=24, fg_color="#5A1E1E", hover_color="#7A2A2A",
+                    command=lambda isim=isim: self._korumali_klasor_sil_ve_yenile(isim)
+                ).grid(row=1 + j, column=1, padx=(0, 12), pady=2, sticky="e")
+            son_satir = 1 + len(ozel)
+        else:
+            ctk.CTkLabel(
+                kutu_ozel, text="(henüz ek klasör eklenmedi)", font=("Arial", 11), text_color="#7FA8C9"
+            ).grid(row=1, column=0, padx=20, pady=2, sticky="w")
+            son_satir = 2
+
+        giris = ctk.CTkEntry(kutu_ozel, placeholder_text="Yeni korumalı klasör adı yazın (örn. Kontrol Formları)")
+        giris.grid(row=son_satir, column=0, padx=(20, 6), pady=(6, 10), sticky="ew")
+        giris.bind("<Return>", lambda e, ent=giris: self._korumali_klasor_ekle_ve_yenile(ent))
+        ctk.CTkButton(
+            kutu_ozel, text="Ekle", width=56, height=28,
+            command=lambda ent=giris: self._korumali_klasor_ekle_ve_yenile(ent)
+        ).grid(row=son_satir, column=1, padx=(0, 12), pady=(6, 10), sticky="e")
+
+    def _korumali_klasor_ekle_ve_yenile(self, giris_widget):
+        isim = giris_widget.get().strip()
+        if not isim:
+            return
+        korumali_klasor_ekle(self._kk_klasor, isim)
+        self._korumali_klasorler_listesini_ciz()
+
+    def _korumali_klasor_sil_ve_yenile(self, isim):
+        korumali_klasor_sil(self._kk_klasor, isim)
+        self._korumali_klasorler_listesini_ciz()
 
 
 if __name__ == "__main__":

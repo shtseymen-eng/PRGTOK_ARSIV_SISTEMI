@@ -88,7 +88,7 @@ try:
 except Exception:
     OCR_KULLANILABILIR = False
 
-SURUM = "2.5.1"
+SURUM = "2.6.0"
 
 # ----------------------------------------------------------------------------
 # ISLEM KODLARI
@@ -143,14 +143,25 @@ ESKI_T9_TURLERI = {"T9 GECICI", "T9 MUAYENE", "T9 ANA", "T9 MUAYENE SERTIFIKASI"
 # KLASORLER
 #
 # Kullanici, arsivleme mantigi programdan tamamen farkli olan kendi klasorlerini
-# (ör. "Kontrol Formu") ana klasorun altina acabilir. Bu klasorler asagidaki
-# listeye eklenir; tarama (klasor_tara / tum_dosyalari_yeniden_tara) bu
-# klasorlerin ICINE HIC GIRMEZ: ne icindeki dosyalari baska yere tasir, ne de
-# disaridan bu klasore dosya sokar. Karsilastirma buyuk/kucuk harf ve Turkce
-# karakter farkina duyarsizdir (kullanici "Kontrol Formu", "KONTROL FORMU"
-# ya da "kontrol formu" yazsa da ayni klasor olarak taninir).
+# (ör. "Kontrol Formu", "Kontrol Formlari") ana klasorun altina acabilir. Bu
+# klasorler asagidaki VARSAYILAN listeye + kullanicinin sonradan program
+# icinden ekledigi ozel isimlere eklenir; tarama (klasor_tara /
+# tum_dosyalari_yeniden_tara) bu klasorlerin ICINE HIC GIRMEZ: ne icindeki
+# dosyalari baska yere tasir, ne de disaridan bu klasore dosya sokar.
+# Karsilastirma buyuk/kucuk harf ve Turkce karakter farkina duyarsizdir
+# (kullanici "Kontrol Formu", "KONTROL FORMU" ya da "kontrol formu" yazsa da
+# ayni klasor olarak taninir).
+#
+# Kullanicinin kendi ekledigi ek isimler, her ana klasore ozel olarak
+# "ISLEM RAPORLARI/KORUMALI KLASORLER.json" dosyasinda saklanir (bkz.
+# korumali_klasorleri_oku / korumali_klasor_ekle / korumali_klasor_sil).
+# Boylece yeni bir "dokunulmasin" klasoru icin kod degisikligi gerekmez;
+# programdaki "Korumali Klasorler" ekranindan eklenip cikarilabilir.
 # ----------------------------------------------------------------------------
-KULLANICI_KORUMALI_KLASORLER = {"KONTROL FORMU"}
+VARSAYILAN_KULLANICI_KORUMALI_KLASORLER = {"KONTROL FORMU", "KONTROL FORMLARI"}
+
+# Geriye donuk uyumluluk: eski kod bu isimle referans veriyor olabilir.
+KULLANICI_KORUMALI_KLASORLER = VARSAYILAN_KULLANICI_KORUMALI_KLASORLER
 
 
 def _klasor_adi_normalize(text):
@@ -159,6 +170,65 @@ def _klasor_adi_normalize(text):
     diskteki gercek klasor adi degistirilmez)."""
     tr_map = str.maketrans("ığüşöçİĞÜŞÖÇ", "igusocIGUSOC")
     return str(text).translate(tr_map).upper().strip()
+
+
+KORUMALI_KLASOR_DOSYA_ADI = "KORUMALI KLASORLER.json"
+
+
+def _korumali_klasor_dosya_yolu(ana_klasor):
+    return Path(ana_klasor) / "ISLEM RAPORLARI" / KORUMALI_KLASOR_DOSYA_ADI
+
+
+def korumali_klasorleri_oku(ana_klasor):
+    """Bu ana klasore ozel olarak kullanicinin programdan ekledigi, dokunulmasi
+    yasak klasor isimlerini okur. Donus degeri: (normalize_edilmis_kume, ham_liste)
+       - normalize_edilmis_kume: VARSAYILAN_KULLANICI_KORUMALI_KLASORLER + ozel
+         isimlerin hepsinin normalize edilmis hali (tarama fonksiyonlarinda
+         dogrudan karsilastirma icin kullanilir).
+       - ham_liste: sadece kullanicinin kendi ekledigi isimler, oldugu gibi
+         (arayuzde listelemek / silmek icin kullanilir). Dosya yoksa veya
+         bozuksa bos liste doner, hata vermez."""
+    ozel = []
+    yol = _korumali_klasor_dosya_yolu(ana_klasor)
+    if yol.exists():
+        try:
+            with open(yol, "r", encoding="utf-8") as f:
+                veri = json.load(f)
+            if isinstance(veri, list):
+                ozel = [str(x).strip() for x in veri if str(x).strip()]
+        except Exception:
+            ozel = []
+    tumu = set(VARSAYILAN_KULLANICI_KORUMALI_KLASORLER) | set(ozel)
+    normalize_kume = {_klasor_adi_normalize(x) for x in tumu}
+    return normalize_kume, ozel
+
+
+def korumali_klasor_ekle(ana_klasor, isim):
+    """Kullanicinin programdan verdigi yeni bir korumali klasor adini,
+    o ana klasore ozel JSON dosyasina ekler (kalici)."""
+    isim = str(isim).strip()
+    if not isim:
+        return
+    _, ozel = korumali_klasorleri_oku(ana_klasor)
+    if _klasor_adi_normalize(isim) not in {_klasor_adi_normalize(x) for x in ozel}:
+        ozel.append(isim)
+    yol = _korumali_klasor_dosya_yolu(ana_klasor)
+    yol.parent.mkdir(parents=True, exist_ok=True)
+    with open(yol, "w", encoding="utf-8") as f:
+        json.dump(ozel, f, ensure_ascii=False, indent=2)
+
+
+def korumali_klasor_sil(ana_klasor, isim):
+    """Kullanicinin kendi eklemis oldugu bir korumali klasor adini siler.
+    Varsayilan (VARSAYILAN_KULLANICI_KORUMALI_KLASORLER) isimler bu fonksiyonla
+    silinemez; onlar her zaman korumali kalir."""
+    _, ozel = korumali_klasorleri_oku(ana_klasor)
+    hedef = _klasor_adi_normalize(isim)
+    ozel = [x for x in ozel if _klasor_adi_normalize(x) != hedef]
+    yol = _korumali_klasor_dosya_yolu(ana_klasor)
+    yol.parent.mkdir(parents=True, exist_ok=True)
+    with open(yol, "w", encoding="utf-8") as f:
+        json.dump(ozel, f, ensure_ascii=False, indent=2)
 
 # Dosya adindan tur tespiti icin ters-arama tablosu (kisa etiket -> tur)
 TUR_DISPLAY_REVERSE = {v: k for k, v in TUR_DISPLAY.items()}
@@ -1192,15 +1262,15 @@ def klasor_tara(ana_klasor, log_callback=None, progress_callback=None):
     # (os.walk bu klasorlerde asagi inmez), sadece ana klasorun kendisinde
     # (ve taninmayan/yeni herhangi bir alt klasorde) duran, henuz
     # siniflandirilmamis dosyalari islemeye alir.
+    korumali_klasor_kumesi, _ = korumali_klasorleri_oku(ana_klasor)
     ATLA_KLASORLER = {
         _klasor_adi_normalize(x)
         for x in (
             set(BELGE_KLASORLERI.values())
             | {"FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI"}
             | ESKI_T9_TURLERI
-            | KULLANICI_KORUMALI_KLASORLER
         )
-    }
+    } | korumali_klasor_kumesi
 
     dosya_listesi = []
     for root, dirs, files in os.walk(ana):
@@ -1325,12 +1395,13 @@ def tum_dosyalari_yeniden_tara(ana_klasor, log_callback=None, progress_callback=
     sonuclar = []
     ozel_kelimeler = anahtar_kelimeleri_oku(ana_klasor)
 
+    korumali_klasor_kumesi, _ = korumali_klasorleri_oku(ana_klasor)
     ATLA_KLASORLER = {
         _klasor_adi_normalize(x)
         for x in (
-            {"FARKLI FORMAT DOSYALAR", "ISLEM RAPORLARI"} | KULLANICI_KORUMALI_KLASORLER
+            {"FARKLI FORMAT DOSYALAR", "ISLEM RAPORLARI"}
         )
-    }
+    } | korumali_klasor_kumesi
 
     dosya_listesi = []
     for root, dirs, files in os.walk(ana):

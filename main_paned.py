@@ -1,11 +1,12 @@
 import os
 import re
-import shutil
 import sys
 import json
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
+
+from motor import ESKI_DOSYALAR, TARIHI_GECMIS, OKUNABILIR_EXT, RESIM_EXT, dosya_tasi, korumali_klasorleri_oku
 
 try:
     from PIL import Image, ImageTk
@@ -21,10 +22,14 @@ except Exception:
 
 APP_TITLE = "PRGTOK Manuel Düzeltme"
 
-SUPPORTED_EXTENSIONS = [".pdf", ".jpg", ".jpeg", ".png"]
+SUPPORTED_EXTENSIONS = OKUNABILIR_EXT
 
 DOCUMENT_TYPES = {
     "T9": "T9",
+    "RUHSAT": "RUHSAT",
+    "TASIT KARTI": "TASIT KARTI",
+    "TASIT UYGUNLUK MUAYENE SERTIFIKASI": "TASIT UYGUNLUK MUAYENE SERTIFIKASI",
+    "TASIT UYGUNLUK GECICI BELGE": "TASIT UYGUNLUK GECICI BELGE",
     "TANK BASINC RAPORU": "TANK BASINC RAPORU",
     "SIZDIRMAZLIK": "SIZDIRMAZLIK",
     "FENNI MUAYENE": "FENNI MUAYENE",
@@ -124,23 +129,6 @@ def _bilinen_arsiv_klasoru_mu(name: str) -> bool:
 # Manuel Duzeltme aracindan da ACAMAZ / degistiremez. motor.py'nin agir
 # bagimliliklarini (pandas, pdfplumber, vb.) burada tekrar import etmemek
 # icin sadece JSON dosyasi kucuk ve bagimsiz bir sekilde okunuyor.
-_KORUMALI_KLASOR_VARSAYILAN = {"KONTROL FORMU", "KONTROL FORMLARI"}
-
-
-def _korumali_klasor_kumesi(archive_root: Path):
-    isimler = set(_KORUMALI_KLASOR_VARSAYILAN)
-    try:
-        yol = archive_root / "ISLEM RAPORLARI" / "KORUMALI KLASORLER.json"
-        if yol.exists():
-            with open(yol, "r", encoding="utf-8") as f:
-                veri = json.load(f)
-            if isinstance(veri, list):
-                isimler |= {str(x).strip() for x in veri if str(x).strip()}
-    except Exception:
-        pass
-    return {normalize_text(x) for x in isimler}
-
-
 def sanitize_filename(name: str) -> str:
     name = name.strip()
     tr_map = str.maketrans("ığüşöçİĞÜŞÖÇ", "igusocIGUSOC")
@@ -153,7 +141,7 @@ def sanitize_filename(name: str) -> str:
 
 def ensure_e_suffix(stem: str) -> str:
     stem = stem.strip()
-    stem = re.sub(r"(_PRGTOK|_P|_E)$", "", stem, flags=re.IGNORECASE)
+    stem = re.sub(r"_(?:PRGTOK|PRGT|P|E)(?:_\d+)?$", "", stem, flags=re.IGNORECASE)
     return f"{stem} E"
 
 
@@ -201,22 +189,6 @@ def strip_stale_markers(stem: str, keep_label: str = "") -> str:
 
     cleaned = re.sub(r"[\s_\-]+", " ", cleaned).strip(" _-")
     return cleaned
-
-
-def unique_path(target: Path) -> Path:
-    if not target.exists():
-        return target
-
-    parent = target.parent
-    stem = target.stem
-    suffix = target.suffix
-    counter = 1
-
-    while True:
-        candidate = parent / f"{stem}_{counter}{suffix}"
-        if not candidate.exists():
-            return candidate
-        counter += 1
 
 
 class ManualCorrectionApp:
@@ -724,8 +696,12 @@ class ManualCorrectionApp:
         else:
             candidate_archive_root = folder
 
-        korumali = _korumali_klasor_kumesi(candidate_archive_root)
-        if normalized in korumali:
+        for ust in (folder, *folder.parents):
+            if normalize_text(ust.name) in {"FARKLI FORMAT DOSYALAR", ESKI_DOSYALAR, TARIHI_GECMIS}:
+                candidate_archive_root = ust.parent
+                break
+        korumali, _ = korumali_klasorleri_oku(candidate_archive_root)
+        if any(normalize_text(part) in korumali for part in folder.resolve().parts):
             messagebox.showwarning(
                 "Korumalı Klasör",
                 f"\"{folder.name}\" klasörü korumalı olarak işaretlenmiş.\n\n"
@@ -734,12 +710,8 @@ class ManualCorrectionApp:
             )
             return
 
-        if _bilinen_arsiv_klasoru_mu(folder.name):
-            self.archive_root = folder.parent
-            self.browse_folder = folder
-        else:
-            self.archive_root = folder
-            self.browse_folder = folder
+        self.archive_root = candidate_archive_root
+        self.browse_folder = folder
 
         self.root_folder = self.archive_root
 
@@ -865,7 +837,7 @@ class ManualCorrectionApp:
             text=f"Belge: {self.index + 1} / {total}   ·   Kalan: {total - self.index - 1}")
         self.old_name_var.set(file_path.name)
 
-        clean_initial = re.sub(r"(_PRGTOK|_P|_E)$", "", file_path.stem, flags=re.IGNORECASE)
+        clean_initial = re.sub(r"_(?:PRGTOK|PRGT|P|E)(?:_\d+)?$", "", file_path.stem, flags=re.IGNORECASE)
         clean_initial = strip_stale_markers(clean_initial)
         self.new_name_var.set(clean_initial)
         self.doc_type_var.set("")
@@ -880,6 +852,13 @@ class ManualCorrectionApp:
         self.preview_canvas.delete("all")
         self.current_image_ref = None
         self.base_preview_image = None
+
+        if file_path.suffix.lower() not in RESIM_EXT | {".pdf"}:
+            self.preview_canvas.create_text(
+                420, 300, text="Belgeyi kendi uygulamasında açarak inceleyebilirsiniz.",
+                font=("Segoe UI", 14), fill=COLORS["muted"]
+            )
+            return
 
         if Image is None or ImageTk is None:
             self.preview_canvas.create_text(
@@ -995,16 +974,11 @@ class ManualCorrectionApp:
     def do_pan(self, event):
         self.preview_canvas.scan_dragto(event.x, event.y, gain=1)
 
-    def target_folder_for_doc_type(self, doc_type: str) -> Path:
-        # v2.4.0'dan itibaren ana tarama motoru alt klasorleri dogrudan secilen
-        # ana klasorun altina aciyor (araya "PREGATE ARSIV" eklemiyor). Manuel
-        # duzeltme araci da AYNI klasor yapisini kullanmali; aksi halde
-        # duzeltilen dosyalar ana arsivden ayri, gorunmeyen bir "PREGATE ARSIV"
-        # kopya agacinda kalir.
-        folder_name = DOCUMENT_TYPES.get(doc_type, "DIGER BELGELER")
-        target = self.root_folder / folder_name
-        target.mkdir(parents=True, exist_ok=True)
-        return target
+    def target_folder_for_doc_type(self, doc_type: str, dosya: Path) -> Path:
+        kok = self.archive_root
+        if dosya.suffix.lower() != ".pdf":
+            kok = kok / "FARKLI FORMAT DOSYALAR" / dosya.suffix[1:].upper()
+        return kok / DOCUMENT_TYPES[doc_type]
 
     def save_and_next(self):
         current_files = self.get_current_files()
@@ -1040,12 +1014,12 @@ class ManualCorrectionApp:
 
         clean_stem = ensure_e_suffix(clean_stem)
 
-        target_folder = self.target_folder_for_doc_type(doc_type)
-        target_path = unique_path(
-            target_folder / f"{clean_stem}{file_path.suffix.lower()}")
-
         try:
-            shutil.move(str(file_path), str(target_path))
+            target_folder = self.target_folder_for_doc_type(doc_type, file_path)
+            korumali, _ = korumali_klasorleri_oku(self.archive_root)
+            target_path = dosya_tasi(
+                file_path, target_folder, f"{clean_stem}{file_path.suffix}", korumali=korumali
+            )
             self.status_label.config(
                 text=f"✅  Taşındı: {target_path.name}")
 

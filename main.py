@@ -4,11 +4,6 @@
 #
 # v2.1.0 ARAYUZ DEGISIKLIKLERI:
 #   - "Ayarlar" ve "Klasor Yapisi" menuleri kaldirildi.
-#   - "Arama" artik alt sekme degil: sol menude tiklaninca UST tarafta
-#     bir arama cubugu acilir/kapanir (toggle).
-#   - Arama en az 3 harf yazilinca otomatik calisir, sonuclari listede
-#     gosterir. Sonuc satirina CIFT TIKLAYINCA dosya isletim sisteminde
-#     dogrudan acilir (Windows: os.startfile).
 #   - Sonuc tablosunda "Dosya Konumu" ve "Son Islem Tarihi" sutunlari var.
 #   - Tarama sirasinda ilerleme cubugu (yuzde + sayi, ör: 3/120) gosterilir.
 #   - Sag ust kosede son tarama tarih/saati otomatik gosterilir.
@@ -21,6 +16,7 @@ import os
 import platform
 import subprocess
 import threading
+from queue import Empty, SimpleQueue
 from pathlib import Path
 from tkinter import filedialog, ttk, messagebox, Toplevel
 
@@ -30,10 +26,10 @@ from PIL import Image
 from motor import (
     SURUM,
     klasor_tara,
-    arama_yap,
     ozet_sayilar,
     zorla_yeniden_oku,
     tum_dosyalari_yeniden_tara,
+    tarih_kontrolu,
     son_tarama_bilgisi_oku,
     BELGE_KLASORLERI,
     anahtar_kelimeleri_oku,
@@ -53,7 +49,7 @@ APP_TITLE = f"PRGTOK Arşiv Sistemi v{SURUM}"
 # Koyu lacivert tema (v2.0.0 ile aynı renk paleti - kullanıcı talebiyle geri alındı)
 RENK_ANA_ARKA = "#071320"        # ana alan arka plani (koyu lacivert)
 RENK_KART = "#10283D"            # ozet/kategori kartlari
-RENK_PANEL = "#0B1E30"           # arama/tablo paneli
+RENK_PANEL = "#0B1E30"           # tablo paneli
 RENK_SIDEBAR = "#071827"         # sol menu arka plani
 RENK_METIN_KOYU = "#DCEBFF"      # koyu zemin uzerindeki acik yazi rengi
 
@@ -80,9 +76,8 @@ class PRGTOKApp(ctk.CTk):
 
         self.ana_klasor = ctk.StringVar(value="Henüz klasör seçilmedi")
         self.assets = Path(__file__).parent / "assets"
-        self.arama_acik = False
-        self.son_arama_sorgusu = ""
         self._tam_yol_haritasi = {}
+        self._tarama_guncellemeleri = SimpleQueue()
 
         self._ikon_ayarla()
         self._build_ui()
@@ -132,14 +127,13 @@ class PRGTOKApp(ctk.CTk):
         ).grid(row=1, column=0, padx=24, pady=(0, 1), sticky="ew")
 
         ctk.CTkLabel(
-            self.sidebar, text=f"Sadece PDF • v{SURUM}", font=("Arial", 10), anchor="w",
+            self.sidebar, text=f"v{SURUM}", font=("Arial", 10), anchor="w",
             text_color="#7FA8C9"
         ).grid(row=2, column=0, padx=24, pady=(0, 10), sticky="ew")
 
         menu = [
             ("🏠 Anasayfa", self.anasayfa),
             ("📄 Tüm Belgeler", self.anasayfa),
-            ("🔎 Arama", self.arama_toggle),
             ("📊 İşlem Raporları", self.rapor_bilgi),
             ("🔑 Anahtar Kelimeler", self.anahtar_kelimeler_penceresi_ac),
             ("🔒 Korumalı Klasörler", self.korumali_klasorler_penceresi_ac),
@@ -167,7 +161,7 @@ class PRGTOKApp(ctk.CTk):
         ).grid(row=11, column=0, padx=16, pady=2, sticky="ew")
 
         self.btn_tara = ctk.CTkButton(
-            self.sidebar, text="🚀 Klasörü Tara (PDF)", height=32, font=("Arial", 12),
+            self.sidebar, text="🚀 Klasörü Tara", height=32, font=("Arial", 12),
             fg_color="#0B7A32", hover_color="#0A632A", command=self.tara
         )
         self.btn_tara.grid(row=12, column=0, padx=16, pady=2, sticky="ew")
@@ -188,6 +182,12 @@ class PRGTOKApp(ctk.CTk):
             fg_color="#5A1E8C", hover_color="#7327B0", command=self.tumunu_yeniden_tara
         )
         self.btn_tumunu.grid(row=15, column=0, padx=16, pady=2, sticky="ew")
+
+        self.btn_tarih = ctk.CTkButton(
+            self.sidebar, text="📅 Tarih Kontrolü (PDF)", height=32, font=("Arial", 12),
+            command=self.tarih_sorgula,
+        )
+        self.btn_tarih.grid(row=16, column=0, padx=16, pady=2, sticky="ew")
 
         self.signature = ctk.CTkFrame(self.sidebar, fg_color="#06111D")
         self.signature.grid(row=21, column=0, padx=12, pady=(4, 8), sticky="sew")
@@ -250,24 +250,6 @@ class PRGTOKApp(ctk.CTk):
             self.progress_frame, text="", font=("Arial", 12, "bold"), text_color=RENK_METIN_KOYU
         )
 
-        self.arama_frame = ctk.CTkFrame(self.main, fg_color=RENK_PANEL, corner_radius=12)
-        self.arama_frame.grid_columnconfigure(1, weight=1)
-
-        ctk.CTkLabel(
-            self.arama_frame, text="🔎 Arama", font=("Arial", 14, "bold")
-        ).grid(row=0, column=0, padx=14, pady=12)
-        self.search_entry = ctk.CTkEntry(
-            self.arama_frame,
-            placeholder_text="En az 3 harf yazın: Plaka, Tank No, Şasi No, Sürücü adı..."
-        )
-        self.search_entry.grid(row=0, column=1, padx=8, pady=12, sticky="ew")
-        self.search_entry.bind("<KeyRelease>", self._arama_yazildi)
-        self.search_entry.bind("<Return>", lambda e: self.ara())
-        ctk.CTkButton(self.arama_frame, text="Kapat", width=90, fg_color="#5A1E1E",
-                      hover_color="#7A2A2A", command=self.arama_toggle).grid(
-            row=0, column=2, padx=12, pady=12
-        )
-
         self.stats_frame = ctk.CTkFrame(self.main, fg_color="transparent")
         self.stats_frame.grid(row=4, column=0, padx=18, pady=6, sticky="ew")
         for i in range(5):
@@ -275,7 +257,7 @@ class PRGTOKApp(ctk.CTk):
 
         self.stat_labels = {}
         stat_names = [
-            ("TOPLAM", "Toplam PDF"),
+            ("TOPLAM", "Toplam Belge"),
             ("TANK BASINC RAPORU", "Tank Basınç"),
             ("OKUNAMAYAN PDF", "Okunamayan PDF"),
             ("FARKLI FORMAT DOSYALAR", "Farklı Format"),
@@ -298,6 +280,10 @@ class PRGTOKApp(ctk.CTk):
             ("TANK BASINC RAPORU", "TANK BASINC RAPORU"),
             ("ISOPA", "ISOPA"),
             ("T9", "T9"),
+            ("RUHSAT", "RUHSAT"),
+            ("TASIT KARTI", "TAŞIT KARTI"),
+            ("TASIT UYGUNLUK MUAYENE SERTIFIKASI", "UYGUNLUK MUAYENE SERTİFİKASI"),
+            ("TASIT UYGUNLUK GECICI BELGE", "UYGUNLUK GEÇİCİ BELGE"),
             ("TRAFIK SIGORTASI", "TRAFIK SIGORTASI"),
             ("TEHLIKELI MADDE SIGORTASI", "TEHLIKELI MADDE SIGORTASI"),
             ("FENNI MUAYENE", "FENNI MUAYENE"),
@@ -308,6 +294,8 @@ class PRGTOKApp(ctk.CTk):
             ("DIGER BELGELER", "DIGER BELGELER"),
             ("FARKLI FORMAT DOSYALAR", "FARKLI FORMAT DOSYALAR"),
             ("OKUNAMAYAN PDF", "OKUNAMAYAN PDF"),
+            ("ESKI DOSYALAR", "ESKİ DOSYALAR"),
+            ("TARIHI GECMIS", "TARİHİ GEÇMİŞ"),
         ]
         self.cat_labels = {}
         for i, (cat, label) in enumerate(categories):
@@ -325,7 +313,7 @@ class PRGTOKApp(ctk.CTk):
         self.table_frame.grid_columnconfigure(0, weight=1)
 
         self.result_title = ctk.CTkLabel(
-            self.table_frame, text="Arama Sonuçları", font=("Arial", 15, "bold"), anchor="w"
+            self.table_frame, text="Tarama Sonuçları", font=("Arial", 15, "bold"), anchor="w"
         )
         self.result_title.grid(row=0, column=0, padx=14, pady=10, sticky="ew")
 
@@ -352,30 +340,9 @@ class PRGTOKApp(ctk.CTk):
         )
         self.status.grid(row=8, column=0, padx=18, pady=(0, 8), sticky="ew")
 
-    def arama_toggle(self):
-        if self.arama_acik:
-            self.arama_frame.grid_forget()
-            self.arama_acik = False
-        else:
-            self.arama_frame.grid(row=3, column=0, padx=18, pady=8, sticky="ew")
-            self.arama_acik = True
-            self.search_entry.focus()
-
-    def _arama_yazildi(self, event=None):
-        q = self.search_entry.get().strip()
-        if len(q) < 3:
-            if len(q) == 0:
-                self.result_title.configure(text="Arama Sonuçları")
-                self.tablo_doldur(None)
-            return
-        if q == self.son_arama_sorgusu:
-            return
-        self.son_arama_sorgusu = q
-        self.ara()
-
     def anasayfa(self):
         self.ozet_yenile()
-        self.result_title.configure(text="Arama Sonuçları")
+        self.result_title.configure(text="Tarama Sonuçları")
         self.status.configure(text="● Anasayfa")
 
     def klasor_sec(self):
@@ -404,17 +371,42 @@ class PRGTOKApp(ctk.CTk):
 
     def _set_tarama_butonlari(self, enabled):
         durum = "normal" if enabled else "disabled"
-        for btn in (self.btn_tara, self.btn_zorla, self.btn_tumunu, self.btn_yenile):
+        for btn in (self.btn_tara, self.btn_zorla, self.btn_tumunu, self.btn_yenile, self.btn_tarih):
             btn.configure(state=durum)
 
     def _arka_planda_calistir(self, is_yap, bitince):
         def calistir():
             try:
                 sonuc = is_yap()
-                self.after(0, lambda: bitince(sonuc, None))
-            except Exception as e:
-                self.after(0, lambda: bitince(None, e))
+                self._tarama_guncellemeleri.put(("bitti", (sonuc, None)))
+            except Exception as hata:
+                self._tarama_guncellemeleri.put(("bitti", (None, hata)))
+
+        def guncellemeleri_al():
+            son = {}
+            for _ in range(256):
+                try:
+                    tur, veri = self._tarama_guncellemeleri.get_nowait()
+                except Empty:
+                    break
+                son[tur] = veri
+            if "durum" in son:
+                self._durum_guncelle(son["durum"])
+            if "ilerleme" in son:
+                n, toplam = son["ilerleme"]
+                oran = n / toplam if toplam else 0
+                self.progress_bar.set(oran)
+                self.progress_label.configure(text=f"{n} / {toplam}  (%{int(oran * 100)})")
+            if "bitti" in son:
+                bitince(*son["bitti"])
+            else:
+                self.after(100, guncellemeleri_al)
+
         threading.Thread(target=calistir, daemon=True).start()
+        self.after(100, guncellemeleri_al)
+
+    def _tarama_durumu(self, mesaj):
+        self._tarama_guncellemeleri.put(("durum", mesaj))
 
     def _ilerleme_goster(self):
         self.progress_bar.set(0)
@@ -427,12 +419,7 @@ class PRGTOKApp(ctk.CTk):
         self.progress_label.grid_forget()
 
     def _ilerleme_guncelle(self, n, toplam):
-        def _uygula():
-            oran = 0 if toplam <= 0 else n / toplam
-            self.progress_bar.set(oran)
-            yuzde = int(oran * 100)
-            self.progress_label.configure(text=f"{n} / {toplam}  (%{yuzde})")
-        self.after(0, _uygula)
+        self._tarama_guncellemeleri.put(("ilerleme", (n, toplam)))
 
     def tara(self):
         yol = self.ana_klasor.get()
@@ -446,13 +433,16 @@ class PRGTOKApp(ctk.CTk):
         def is_yap():
             return klasor_tara(
                 yol,
-                log_callback=lambda msg: self.after(0, self._durum_guncelle, msg),
+                log_callback=self._tarama_durumu,
                 progress_callback=self._ilerleme_guncelle,
             )
 
         def bitince(df, hata):
             self._set_tarama_butonlari(True)
             self._ilerleme_gizle()
+            if self.ana_klasor.get() != yol:
+                self._durum_guncelle("● Önceki klasördeki işlem tamamlandı.")
+                return
             if hata is not None:
                 messagebox.showerror("Hata", str(hata))
                 self.status.configure(text="● Hata oluştu")
@@ -473,19 +463,6 @@ class PRGTOKApp(ctk.CTk):
         yüzden arşiv büyük olsa da bu işlem hızlı kalır."""
         self.tara()
 
-    def ara(self):
-        yol = self.ana_klasor.get()
-        if not os.path.isdir(yol):
-            messagebox.showwarning("Klasör seç", "Önce ana klasörü seç.")
-            return
-        q = self.search_entry.get().strip()
-        if len(q) < 3:
-            messagebox.showinfo("Arama", "Lütfen en az 3 harf girin.")
-            return
-        df = arama_yap(yol, q)
-        self.result_title.configure(text=f"Arama Sonuçları ({q}) - {len(df)} kayıt")
-        self.tablo_doldur(df)
-
     def tablo_doldur(self, df):
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -496,7 +473,7 @@ class PRGTOKApp(ctk.CTk):
 
         gosterim_kolonlari = list(self.tree["columns"])
 
-        for _, row in df.iterrows():
+        for _, row in df.fillna("").iterrows():
             tam_yol = row.get("Tam Yol", "") or os.path.join(
                 str(row.get("Yeni Klasör", "")), str(row.get("Yeni Dosya Adı", ""))
             )
@@ -551,13 +528,16 @@ class PRGTOKApp(ctk.CTk):
         def is_yap():
             return zorla_yeniden_oku(
                 yol,
-                log_callback=lambda msg: self.after(0, self._durum_guncelle, msg),
+                log_callback=self._tarama_durumu,
                 progress_callback=self._ilerleme_guncelle,
             )
 
         def bitince(df, hata):
             self._set_tarama_butonlari(True)
             self._ilerleme_gizle()
+            if self.ana_klasor.get() != yol:
+                self._durum_guncelle("● Önceki klasördeki işlem tamamlandı.")
+                return
             if hata is not None:
                 messagebox.showerror("Hata", str(hata))
                 self.status.configure(text="● Hata oluştu")
@@ -576,10 +556,8 @@ class PRGTOKApp(ctk.CTk):
             return
         onay = messagebox.askyesno(
             "Tümünü Yeniden Tara",
-            "Bu işlem TÜM PDF dosyalarını (P veya E kodlu olsa da) içerikten "
-            "yeniden okuyup yeniden sınıflandırır ve eski T9 alt klasörlerini "
-            "tek 'T9' klasöründe birleştirir.\n\n"
-            "FARKLI FORMAT DOSYALAR klasörüne dokunulmaz.\n\n"
+            "Bu işlem desteklenen PDF, Word, Excel ve resim dosyalarını yeniden "
+            "okuyup sınıflandırır. Kontrol Formu klasörü korunur.\n\n"
             "Bu, normal taramadan ÇOK DAHA UZUN sürebilir. Devam edilsin mi?"
         )
         if not onay:
@@ -591,13 +569,16 @@ class PRGTOKApp(ctk.CTk):
         def is_yap():
             return tum_dosyalari_yeniden_tara(
                 yol,
-                log_callback=lambda msg: self.after(0, self._durum_guncelle, msg),
+                log_callback=self._tarama_durumu,
                 progress_callback=self._ilerleme_guncelle,
             )
 
         def bitince(df, hata):
             self._set_tarama_butonlari(True)
             self._ilerleme_gizle()
+            if self.ana_klasor.get() != yol:
+                self._durum_guncelle("● Önceki klasördeki işlem tamamlandı.")
+                return
             if hata is not None:
                 messagebox.showerror("Hata", str(hata))
                 self.status.configure(text="● Hata oluştu")
@@ -609,6 +590,34 @@ class PRGTOKApp(ctk.CTk):
                 self.tablo_doldur(df.tail(300))
 
         self._arka_planda_calistir(is_yap, bitince)
+
+    def tarih_sorgula(self):
+        yol = self.ana_klasor.get()
+        if not os.path.isdir(yol):
+            messagebox.showwarning("Klasör seç", "Önce ana klasörü seç.")
+            return
+        self._set_tarama_butonlari(False)
+        self._ilerleme_goster()
+        self.status.configure(text="● PDF tarih kontrolü başladı…")
+
+        def bitince(df, hata):
+            self._set_tarama_butonlari(True)
+            self._ilerleme_gizle()
+            if self.ana_klasor.get() != yol:
+                self._durum_guncelle("● Önceki klasördeki işlem tamamlandı.")
+                return
+            if hata is not None:
+                self._durum_guncelle(f"● Tarih kontrolü hatası: {hata}")
+                return
+            gecmis = (df["İşlem Durumu"] == "TARİHİ GEÇMİŞ").sum() if not df.empty else 0
+            self._durum_guncelle(f"● Tarih kontrolü tamamlandı. Taranan: {len(df)} • Tarihi geçmiş: {gecmis}")
+            self.ozet_yenile()
+            self.tablo_doldur(df.tail(300))
+
+        self._arka_planda_calistir(
+            lambda: tarih_kontrolu(yol, self._tarama_durumu, self._ilerleme_guncelle),
+            bitince,
+        )
 
     def rapor_bilgi(self):
         messagebox.showinfo(

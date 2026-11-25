@@ -4,7 +4,7 @@
 ; menusu kisayollarini otomatik olusturmak; dogru ikonu kullanmak.
 
 #define MyAppName "PRGTOK Arsiv Sistemi"
-#define MyAppVersion "2.4.0"
+#define MyAppVersion "2.7.0"
 #define MyAppPublisher "Poliport"
 #define MyAppExeName "PRGTOK_ARSIV_SISTEMI.exe"
 
@@ -33,7 +33,7 @@ Name: "turkish"; MessagesFile: "compiler:Languages\Turkish.isl"
 Name: "desktopicon"; Description: "Masaüstü simgesi oluştur"; GroupDescription: "Ek simgeler:"; Flags: checkedonce
 
 [Files]
-Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\PRGTOK_ARSIV_SISTEMI\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"

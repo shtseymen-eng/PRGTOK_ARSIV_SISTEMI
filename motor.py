@@ -1,94 +1,37 @@
 # ============================================================================
 # PRGTOK ARSIV SISTEMI - motor.py
-# Surum: 2.0.0  (sifirdan yeniden yazildi)
-#
-# DEGISIKLIKLER (v2.0.0):
-#   - Program SADECE PDF dosyalarini tarar / siniflandirir / isimlendirir.
-#   - PDF olmayan TUM dosyalar (jpg, png, docx, xlsx, vb.) tek bir
-#     "FARKLI FORMAT DOSYALAR" klasorune tasinir; bu dosyalar OCR/metin
-#     okuma surecine hic girmez (eskiden resimler icin OCR yapiliyordu,
-#     bu kaldirildi - sadece PDF okunur).
-#   - T9 alt turleri (T9_GECICI / T9_MUAYENE / T9_ANA) KALDIRILDI.
-#     Hepsi tek "T9" kategorisinde birlesti.
-#   - Islem kodu sistemi sadelesti:
-#       "P"  = Program tarafindan otomatik tarandi/siniflandirildi
-#       "E"  = Elle duzeltildi (kullanici dosya adini kendi yazdi)
-#     Kod HER ZAMAN dosya adinin SONUNDA (uzantidan once) yer alir.
-#   - "E" ile bitmis dosyalar: program bu dosyalarin ICERIGINI BIR DAHA
-#     OKUMAZ. Sadece dosya adi icindeki tur anahtar kelimesine gore
-#     dogru klasore tasir (kullanicinin yazdigi isim oldugu gibi kalir,
-#     sadece konum kontrol edilir / duzeltilir).
-#   - "P" ile bitmis dosyalar: zaten islenmis sayilir, sadece dogru
-#     klasorde mi diye konum kontrolu yapilir (yeniden okunmaz).
-#   - Kod tasimayan / ne P ne E olan PDF'ler: icerik okunur, turu
-#     bulunur, yeniden adlandirilir (sonuna " P" eklenir) ve ilgili
-#     klasore tasinir.
-# ============================================================================
+# PDF, Word, Excel ve resim arsivleme motoru.
 
 import json
 import os
 import re
 import shutil
 import threading
+import subprocess
+import sys
+from io import BytesIO
+from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
-import pdfplumber
+import fitz
+from PIL import Image, ImageOps, ImageSequence
+from docx import Document
 
-# OCR (resimden metin tanima) - sadece normal yontemle metin cikarilamayan
-# (taranmis/resim tabanli) PDF'ler icin devreye girer. Kutuphaneler
-# kurulu degilse OCR sessizce devre disi kalir, program calismayi
-# surdurur (sadece OKUNAMAYAN PDF sayisi yuksek kalir).
-try:
-    from pdf2image import convert_from_path as _ocr_pdf_to_images
-    import pytesseract as _ocr_engine
-    OCR_KULLANILABILIR = True
+SURUM = "2.7.0"
+ESKI_DOSYALAR = "ESKI DOSYALAR"
+TARIHI_GECMIS = "TARIHI GECMIS"
 
+
+def _tesseract_yolu():
+    paket = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+    adaylar = [paket / "tesseract" / "tesseract.exe"]
     if os.name == "nt":
-        import subprocess, sys as _sys
+        adaylar.append(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tesseract.exe")
+    return next((str(yol) for yol in adaylar if yol.is_file()), None) or shutil.which("tesseract")
 
-        # Windows'ta Tesseract ve Poppler cagrilirken siyah konsol
-        # penceresi acilmasin: subprocess'e CREATE_NO_WINDOW bayragi ver.
-        _CREATE_NO_WINDOW = 0x08000000
-
-        # pdf2image icindeki Popen cagrisini gizli yap
-        _orijinal_popen = subprocess.Popen
-        def _gizli_popen(*args, **kwargs):
-            if os.name == "nt":
-                kwargs.setdefault("creationflags", 0)
-                kwargs["creationflags"] |= _CREATE_NO_WINDOW
-                kwargs.setdefault("startupinfo", subprocess.STARTUPINFO())
-                kwargs["startupinfo"].dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                kwargs["startupinfo"].wShowWindow = 0
-            return _orijinal_popen(*args, **kwargs)
-        subprocess.Popen = _gizli_popen
-
-        # pytesseract icin de ayni ayar
-        _ocr_engine.pytesseract.get_tesseract_version.__globals__.get(
-            "subprocess", subprocess)  # noqa – sadece import tetikle
-
-        # PyInstaller ile paketlendiginde Tesseract ve Poppler exe icine
-        # gomulur; sys._MEIPASS bu gecici klasore isaret eder.
-        _meipass = getattr(_sys, "_MEIPASS", None)
-
-        _olasi_tesseract_yollari = []
-        if _meipass:
-            _olasi_tesseract_yollari.append(
-                os.path.join(_meipass, "tesseract", "tesseract.exe"))
-        _olasi_tesseract_yollari += [
-            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-        ]
-        for _yol in _olasi_tesseract_yollari:
-            if os.path.exists(_yol):
-                _ocr_engine.pytesseract.tesseract_cmd = _yol
-                break
-except Exception:
-    OCR_KULLANILABILIR = False
-
-SURUM = "2.6.1"
 
 # ----------------------------------------------------------------------------
 # ISLEM KODLARI
@@ -109,6 +52,10 @@ BELGE_KLASORLERI = {
     "TANK BASINC RAPORU": "TANK BASINC RAPORU",
     "ISOPA": "ISOPA",
     "T9": "T9",
+    "RUHSAT": "RUHSAT",
+    "TASIT KARTI": "TASIT KARTI",
+    "TASIT UYGUNLUK MUAYENE SERTIFIKASI": "TASIT UYGUNLUK MUAYENE SERTIFIKASI",
+    "TASIT UYGUNLUK GECICI BELGE": "TASIT UYGUNLUK GECICI BELGE",
     "TRAFIK SIGORTASI": "TRAFIK SIGORTASI",
     "TEHLIKELI MADDE SIGORTASI": "TEHLIKELI MADDE SIGORTASI",
     "FENNI MUAYENE": "FENNI MUAYENE",
@@ -124,6 +71,10 @@ TUR_DISPLAY = {
     "TANK BASINC RAPORU": "TANK BASINC",
     "ISOPA": "ISOPA",
     "T9": "T9",
+    "RUHSAT": "RUHSAT",
+    "TASIT KARTI": "TASIT KARTI",
+    "TASIT UYGUNLUK MUAYENE SERTIFIKASI": "TASIT UYGUNLUK MUAYENE SERTIFIKASI",
+    "TASIT UYGUNLUK GECICI BELGE": "TASIT UYGUNLUK GECICI BELGE",
     "TRAFIK SIGORTASI": "TRAFIK SIGORTASI",
     "TEHLIKELI MADDE SIGORTASI": "TEHLIKELI MADDE SIGORTASI",
     "FENNI MUAYENE": "FENNI MUAYENE",
@@ -158,7 +109,7 @@ ESKI_T9_TURLERI = {"T9 GECICI", "T9 MUAYENE", "T9 ANA", "T9 MUAYENE SERTIFIKASI"
 # Boylece yeni bir "dokunulmasin" klasoru icin kod degisikligi gerekmez;
 # programdaki "Korumali Klasorler" ekranindan eklenip cikarilabilir.
 # ----------------------------------------------------------------------------
-VARSAYILAN_KULLANICI_KORUMALI_KLASORLER = {"KONTROL FORMU", "KONTROL FORMLARI"}
+VARSAYILAN_KULLANICI_KORUMALI_KLASORLER = {"KONTROL FORMU", "KONTROL FORMLARI", "FAALIYET BELGESI", "FAALIYET BELGELERI"}
 
 # Geriye donuk uyumluluk: eski kod bu isimle referans veriyor olabilir.
 KULLANICI_KORUMALI_KLASORLER = VARSAYILAN_KULLANICI_KORUMALI_KLASORLER
@@ -234,6 +185,9 @@ def korumali_klasor_sil(ana_klasor, isim):
 TUR_DISPLAY_REVERSE = {v: k for k, v in TUR_DISPLAY.items()}
 
 PDF_EXT = {".pdf"}
+RESIM_EXT = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
+EXCEL_EXT = {".xls", ".xlsx", ".xlsm"}
+OKUNABILIR_EXT = PDF_EXT | RESIM_EXT | EXCEL_EXT | {".docx"}
 
 # ----------------------------------------------------------------------------
 # REGEX KALIPLARI
@@ -381,127 +335,105 @@ def en_mantikli_tarih(metin, tur=""):
         m = re.search(p, metin.upper(), re.S)
         if m:
             return tarih_formatla(m.group(1))
-    tarihler = tum_tarihleri_bul(metin)
-    if not tarihler:
-        return ""
-    try:
-        normal = [x for x in tarihler if re.match(r"\d{2}\.\d{2}\.\d{4}", x)]
-        sirali = sorted(set(normal), key=lambda x: datetime.strptime(x, "%d.%m.%Y"))
-        return sirali[-1] if sirali else tarihler[-1]
-    except Exception:
-        return tarihler[-1]
+    return ""
 
 
-OCR_MAX_SAYFA = 3  # OCR sadece ilk N sayfayi tarar (hiz icin)
-OCR_DPI = 200
+def _resim_metni(resim, psm=3):
+    exe = _tesseract_yolu()
+    if not exe:
+        raise RuntimeError("Tesseract OCR bulunamadı.")
+    with BytesIO() as veri:
+        resim.save(veri, format="PNG")
+        png = veri.getvalue()
+
+    ortam = dict(os.environ, OMP_THREAD_LIMIT="1")
+    veri_klasoru = Path(exe).parent / "tessdata"
+    if veri_klasoru.is_dir():
+        ortam["TESSDATA_PREFIX"] = str(veri_klasoru)
+    bayrak = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    for diller in ("tur+eng", "eng"):
+        sonuc = subprocess.run(
+            [exe, "stdin", "stdout", "-l", diller, "--psm", str(psm)],
+            input=png, capture_output=True, timeout=45, creationflags=bayrak, env=ortam,
+        )
+        if sonuc.returncode == 0:
+            metin = sonuc.stdout.decode("utf-8", errors="replace")
+            if metin.strip() or diller == "eng":
+                return metin
+    raise RuntimeError(sonuc.stderr.decode("utf-8", errors="replace").strip())
 
 
-def _poppler_bin_yolu_bul():
-    """Windows'ta pdf2image'in ihtiyac duydugu Poppler (pdftoppm.exe)
-    icin yaygin kurulum konumlarini tarar. Bulunursa bin klasor yolunu,
-    bulunamazsa None doner (bu durumda PATH'e guvenilir)."""
-    if os.name != "nt":
-        return None
+def _kirmizi_serit(resim):
+    """Sayfanin ortasindan gecen belirgin kirmizi seridi arar."""
+    ornek = resim.convert("RGB").resize((96, 96))
+    def kirmizi(x, y):
+        r, g, b = ornek.getpixel((x, y))
+        return r >= 115 and r > 1.35 * max(g, b)
 
-    def _klasorde_ara(kok):
-        for alt in (kok, os.path.join(kok, "bin"), os.path.join(kok, "Library", "bin")):
-            if os.path.exists(os.path.join(alt, "pdftoppm.exe")):
-                return alt
-        return None
-
-    # PyInstaller ile paketlendiginde Poppler _MEIPASS/poppler/bin altinda olur
-    import sys as _sys
-    _meipass = getattr(_sys, "_MEIPASS", None)
-    if _meipass:
-        bulundu = _klasorde_ara(os.path.join(_meipass, "poppler"))
-        if bulundu:
-            return bulundu
-
-    olasi_kokler = [
-        r"C:\Program Files\poppler",
-        r"C:\Program Files\poppler-windows",
-        r"C:\poppler",
-        r"C:\Users\{}\poppler".format(os.environ.get("USERNAME", "")),
-        r"C:\Users\{}\Downloads\poppler".format(os.environ.get("USERNAME", "")),
-    ]
-    for kok in olasi_kokler:
-        if not os.path.isdir(kok):
-            continue
-        bulundu = _klasorde_ara(kok)
-        if bulundu:
-            return bulundu
-        try:
-            for ad in os.listdir(kok):
-                bulundu = _klasorde_ara(os.path.join(kok, ad))
-                if bulundu:
-                    return bulundu
-        except OSError:
-            pass
-
-    taranacak_kokler = [r"C:\\", r"C:\Users\{}".format(os.environ.get("USERNAME", ""))]
-    for taranacak in taranacak_kokler:
-        try:
-            for ad in os.listdir(taranacak):
-                if ad.lower().startswith("poppler"):
-                    bulundu = _klasorde_ara(os.path.join(taranacak, ad))
-                    if bulundu:
-                        return bulundu
-        except OSError:
-            pass
-
-    return None
+    for adim in range(-12, 13):
+        egim = adim / 12
+        for orta in range(37, 60):
+            uzunluk = sum(
+                kirmizi(x, int(orta + egim * (x - 48)))
+                for x in range(16, 80)
+            )
+            if uzunluk >= 44:
+                return True
+    return False
 
 
-_POPPLER_BIN_YOLU = _poppler_bin_yolu_bul() if OCR_KULLANILABILIR else None
-
-
-def pdf_text_oku(dosya_yolu, max_sayfa=None):
-    """PDF'ten metin cikarir. max_sayfa verilirse sadece ilk N sayfa okunur.
-    Normal yontemle (gomulu metin katmani) hic metin cikmazsa, OCR
-    kutuphaneleri kuruluysa otomatik olarak OCR denenir (sadece ilk
-    OCR_MAX_SAYFA sayfa, performans icin)."""
-    metin = ""
-    with pdfplumber.open(dosya_yolu) as pdf:
-        sayfalar = pdf.pages if max_sayfa is None else pdf.pages[:max_sayfa]
-        for sayfa in sayfalar:
-            metin += "\n" + (sayfa.extract_text() or "")
-    metin = metin.strip()
-
-    if not metin and OCR_KULLANILABILIR:
-        try:
-            metin = pdf_text_oku_ocr(dosya_yolu)
-        except Exception:
-            pass
-
-    return metin
-
-
-def pdf_text_oku_ocr(dosya_yolu):
-    """Taranmis/resim tabanli PDF'lerden OCR ile metin cikarir.
-    Sadece pdf_text_oku() normal yontemle hic metin bulamadiginda
-    cagrilir. Performans icin sadece ilk OCR_MAX_SAYFA sayfa islenir."""
-    if not OCR_KULLANILABILIR:
-        return ""
-    sayfalar = _ocr_pdf_to_images(
-        dosya_yolu, dpi=OCR_DPI, first_page=1, last_page=OCR_MAX_SAYFA,
-        poppler_path=_POPPLER_BIN_YOLU,
-    )
-    metin = ""
-    for sayfa_resmi in sayfalar:
-        try:
-            metin += "\n" + _ocr_engine.image_to_string(sayfa_resmi, lang="eng+tur")
-        except Exception:
-            # Turkce dil paketi kurulu degilse sadece ingilizce ile dene
-            try:
-                metin += "\n" + _ocr_engine.image_to_string(sayfa_resmi, lang="eng")
-            except Exception:
-                pass
-    return metin.strip()
+def _belge_oku(kaynak, ikinci=False):
+    uzanti = kaynak.suffix.lower()
+    parcalar = []
+    serit = False
+    if uzanti in PDF_EXT:
+        ocr_hatasi = None
+        with fitz.open(kaynak) as pdf:
+            for sayfa in pdf:
+                metin = sayfa.get_text(sort=True).strip()
+                parcalar.append(metin)
+                uygunluk = "UYGUNLUK BELGE" in _klasor_adi_normalize(" ".join(metin.split()))
+                gorsel = bool(sayfa.get_image_info())
+                if not (ikinci or not metin or gorsel or uygunluk):
+                    continue
+                pix = sayfa.get_pixmap(dpi=300 if ikinci else 180, colorspace=fitz.csRGB)
+                with Image.frombytes("RGB", (pix.width, pix.height), pix.samples) as resim:
+                    serit = serit or _kirmizi_serit(resim)
+                    if not (ikinci or not metin or gorsel):
+                        continue
+                    try:
+                        if ikinci:
+                            with ImageOps.autocontrast(resim.convert("L")) as duz:
+                                parcalar.append(_resim_metni(duz, psm=11))
+                        else:
+                            parcalar.append(_resim_metni(resim))
+                    except (RuntimeError, OSError, subprocess.TimeoutExpired) as hata:
+                        ocr_hatasi = hata
+        if ocr_hatasi is not None and not any(parca.strip() for parca in parcalar):
+            raise ocr_hatasi
+    elif uzanti in RESIM_EXT:
+        with Image.open(kaynak) as resim:
+            for kare in ImageSequence.Iterator(resim):
+                with ImageOps.exif_transpose(kare) as duz:
+                    serit = serit or _kirmizi_serit(duz)
+                    parcalar.append(_resim_metni(duz))
+    elif uzanti == ".docx":
+        belge = Document(kaynak)
+        parcalar.extend(p.text for p in belge.paragraphs)
+        for tablo in belge.tables:
+            for satir in tablo.rows:
+                parcalar.append(" ".join(hucre.text for hucre in satir.cells))
+    elif uzanti in EXCEL_EXT:
+        with pd.ExcelFile(kaynak) as kitap:
+            for sayfa in kitap.sheet_names:
+                tablo = kitap.parse(sayfa, header=None, dtype=str).fillna("")
+                parcalar.extend(" ".join(satir) for satir in tablo.itertuples(index=False, name=None))
+    return "\n".join(parcalar).strip(), serit
 
 
 def plaka_bul(metin):
-    m = TURK_PLAKA_RE.search(metin.upper())
-    return temizle_ad(m.group(0).replace(" ", "")) if m else ""
+    plakalar = {temizle_ad(m.group().replace(" ", "")) for m in TURK_PLAKA_RE.finditer(metin.upper())}
+    return next(iter(plakalar)) if len(plakalar) == 1 else ""
 
 
 def tank_no_bul(metin):
@@ -607,7 +539,7 @@ def yabanci_plaka_bul(metin):
         aday = temizle_ad(m.group(0).replace(" ", ""))
         if 5 <= len(aday) <= 12 and not aday.startswith(yasak):
             adaylar.append(aday)
-    return adaylar[0] if adaylar else ""
+    return adaylar[0] if len(set(adaylar)) == 1 else ""
 
 
 def surucu_adi_bul(metin, dosya_adi=""):
@@ -622,12 +554,6 @@ def surucu_adi_bul(metin, dosya_adi=""):
         isim = m.group(1)
         isim = re.sub(r"[^A-ZÇĞİÖŞÜ\s]", " ", isim)
         isim = re.sub(r"\s+", " ", isim).strip()
-        if anlamli_kimlik_mi(isim):
-            return temizle_ad(isim)
-
-    m = re.search(r"TO\s+([A-ZÇĞİÖŞÜ]{2,}\s+[A-ZÇĞİÖŞÜ]{2,}(?:\s+[A-ZÇĞİÖŞÜ]{2,})?)", buyuk)
-    if m:
-        isim = m.group(1).strip()
         if anlamli_kimlik_mi(isim):
             return temizle_ad(isim)
 
@@ -676,7 +602,7 @@ def bilgi_dosya_adindan(dosya_adi):
 # ----------------------------------------------------------------------------
 # BELGE TURU TESPITI (icerik bazli)
 # ----------------------------------------------------------------------------
-def belge_turu_bul(metin, dosya_adi="", ozel_kelimeler=None):
+def belge_turu_bul(metin, dosya_adi="", ozel_kelimeler=None, kirmizi_serit=False):
     """Belge turunu tespit eder.
 
     ozel_kelimeler verilirse (klasore ozel ayar dosyasindan okunur):
@@ -716,40 +642,28 @@ def belge_turu_bul(metin, dosya_adi="", ozel_kelimeler=None):
         ("TEHLIKELI MADDE" in m or "TEHLİKELİ MADDE" in m or "TEHLIKELI ATIK" in m or "TEHLİKELİ ATIK" in m) and "ZORUNLU MALI SORUMLULUK" in m):
         return "TEHLIKELI MADDE SIGORTASI"
 
-    # ── T9 (birlesik): gecici belge / muayene sertifikasi / ana onay belgesi ──
-    if not _override_edilmis("T9"):
-        if ("GEÇİCİ" in m or "GECICI" in m or
-            "TEMPORARY" in m or "PROVISIONAL" in m or "INTERIM" in m or
-            "23 İŞ GÜNÜ" in m or "23 IS GUNU" in m or "23 WORKING DAY" in m) and (
-            "T9" in m or "ADR" in m or "UYGUNLUK" in m or "ONAY" in m):
-            return "T9"
-
-        if ("MUAYENE SERTIFIKASI" in m or "MUAYENE SERTİFİKASI" in m) and (
-            sasi_bul(m) or "ŞASİ" in m or "SASI NO" in m or "VIN" in m
-        ) and (
-            kapasite_bul(m) or "KAPASİTE" in m or "KAPASITE" in m or "LİTRE" in m or "LITRE" in m
-        ):
-            return "T9"
-
-        if ("BELİRLİ TEHLİKELİ MADDELER TAŞIYAN ARAÇLAR İÇİN ONAY SERTİFİKASI" in m or
-            "BELIRLI TEHLIKELI MADDELER TASIYAN ARACLAR ICIN ONAY SERTIFIKASI" in m or
-            "CERTIFICATE OF APPROVAL FOR VEHICLES CARRYING CERTAIN DANGEROUS GOODS" in m or
-            "TAŞIT UYGUNLUK" in m or "TASIT UYGUNLUK" in m or "ADR UYGUNLUK" in m or
-            "TANK BİLGİLERİ" in m or "TANK BILGILERI" in m or
-            "TANK KODU" in m or "TASIMA BIRIM TIPI" in m or "TAŞIMA BIRIM TIPI" in m or
-            bool(re.search(r"\bUN\s*\d{4}\b", m)) or
-            # INSPECTION CERTIFICATE: arac/ADR onayi olanlar T9;
-            # Tank basinc raporlari (BV, Lloyd's Register, IIC vb.) bu T9
-            # kurali tarafindan yakalanmasin, TANK BASINC RAPORU kurali yakalasin.
-            ("INSPECTION CERTIFICATE" in m and ("TANK" in m or "CONTAINER" in m or "ADR" in m)
-             and not ("TANK CONTAINER" in m and ("PORTABLE TANK" in m or
-                      "INITIAL INSPECTION CERTIFICATE" in m or
-                      "PERIODIC INSPECTION REPORT" in m or
-                      "LLOYD" in m or "BUREAU VERITAS" in m or
-                      "NEW CONSTRUCTION" in m))) or
-            ("T9" in m and ("ADR" in m or "ONAY SERTIFIKA" in m or "ONAY SERTİFİKA" in m or
-                              "UYGUNLUK BELGE" in m or "APPROVAL" in m))):
-            return "T9"
+    baslik = _klasor_adi_normalize(" ".join(metin.split()))
+    uygunluk = bool(re.search(r"\b(?:TASIT|ARAC|ADR)\s+UYGUNLUK\b", baslik))
+    tur_kurallari = (
+        ("TASIT UYGUNLUK GECICI BELGE", uygunluk and bool(re.search(
+            r"\b(?:GECICI\s+(?:TASIT\s+UYGUNLUK\s+)?BELGE(?:SI)?|UYGUNLUK\s+GECICI)\b", baslik
+        ))),
+        ("TASIT UYGUNLUK MUAYENE SERTIFIKASI", uygunluk and "MUAYENE SERTIFIKASI" in baslik),
+        ("TASIT KARTI", bool(re.search(r"\bTASIT KARTI\b", baslik))),
+        ("RUHSAT", bool(re.search(
+            r"\b(?:ARAC TESCIL BELGESI|MOTORLU ARAC TESCIL BELGESI|ARAC RUHSATI)\b", baslik
+        ))),
+        ("T9", (uygunluk and kirmizi_serit) or bool(re.search(
+            r"BELIRLI TEHLIKELI MADDELER TASIYAN ARACLAR ICIN ONAY SERTIFIKASI"
+            r"|CERTIFICATE OF APPROVAL FOR VEHICLES CARRYING CERTAIN DANGEROUS GOODS"
+            r"|\bADR UYGUNLUK BELGESI\b|\bT9 (?:ONAY|UYGUNLUK)\b", baslik
+        ))),
+    )
+    for tur, eslesme in tur_kurallari:
+        if eslesme and not _override_edilmis(tur):
+            return tur
+    if uygunluk:
+        return "DIGER BELGELER"
 
     if not _override_edilmis("SRC5") and (
         ("SRC-5" in m or "SRC 5" in m or "SRC5" in m or
@@ -826,9 +740,8 @@ def _islenmis_mi(dosya_adi):
 
 
 def _elle_duzeltilmis_mi(dosya_adi):
-    """Dosya elle duzeltme kodu ile mi isaretli? (E veya eski PRGT)
-    Bu dosyalarin ICERIGI BIR DAHA OKUNMAZ; sadece konumu kontrol edilir."""
-    return _son_token(dosya_adi) in ({ELLE_DUZELT_KODU} | ESKI_ELLE_DUZELT_KODLARI)
+    """E ve eski PRGT işaretlerini, eski çakışma ekleriyle birlikte tanır."""
+    return bool(re.search(r"(?:^|[ _-])(?:E|PRGT)(?:_\d+)?$", Path(dosya_adi).stem.strip(), re.I))
 
 
 def _kod_degistir(dosya_adi, yeni_kod):
@@ -880,10 +793,15 @@ def klasorleri_hazirla(ana_klasor):
     # Alt klasorler dogrudan ana (secilen Taramalar) klasorune acilir,
     # araya "PREGATE ARSIV" eklenmez.
     arsiv = ana
+    korumali, _ = korumali_klasorleri_oku(ana)
+    if any(_klasor_adi_normalize(p) in korumali for p in ana.resolve().parts):
+        raise ValueError("Korumalı klasör taranamaz.")
     for klasor in BELGE_KLASORLERI.values():
-        (arsiv / klasor).mkdir(exist_ok=True)
-    for d in ("FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI"):
-        (ana / d).mkdir(exist_ok=True)
+        if _klasor_adi_normalize(klasor) not in korumali:
+            (arsiv / klasor).mkdir(exist_ok=True)
+    for d in ("FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI", ESKI_DOSYALAR, TARIHI_GECMIS):
+        if _klasor_adi_normalize(d) not in korumali:
+            (ana / d).mkdir(exist_ok=True)
     return arsiv
 
 
@@ -981,10 +899,14 @@ def benzersiz_yol(hedef_yol):
         i += 1
 
 
-def dosya_tasi(kaynak, hedef_klasor, yeni_ad=None):
+def dosya_tasi(kaynak, hedef_klasor, yeni_ad=None, korumali=None):
     """Dosyayi hedef klasore tasir. Hedef yol zaten kaynagin kendisiyse hicbir
     sey yapilmaz (zaten dogru yerde/isimde)."""
+    korumali = korumali or VARSAYILAN_KULLANICI_KORUMALI_KLASORLER
     with _TASIMA_KILIDI:
+        if any(_klasor_adi_normalize(part) in korumali
+               for yol in (kaynak, hedef_klasor) for part in yol.resolve().parts):
+            raise ValueError("Kontrol Formu klasöründe taşıma yapılamaz.")
         hedef_klasor.mkdir(parents=True, exist_ok=True)
         hedef_aday = hedef_klasor / (yeni_ad if yeni_ad else kaynak.name)
         if kaynak.resolve() == hedef_aday.resolve():
@@ -1008,15 +930,15 @@ def _fp(text, max_len=0):
     return t[:max_len] if max_len else t
 
 
-def bilgi_cek(metin, dosya_adi="", ozel_kelimeler=None):
-    tur = belge_turu_bul(metin, dosya_adi, ozel_kelimeler)
+def bilgi_cek(metin, dosya_adi="", ozel_kelimeler=None, tur=None, tarih_oku=True):
+    tur = tur or belge_turu_bul(metin, dosya_adi, ozel_kelimeler)
     dosya_bilgisi = bilgi_dosya_adindan(dosya_adi)
     return {
         "plaka": plaka_bul(metin) or dosya_bilgisi.get("plaka", ""),
         "tank_no": tank_no_bul(metin) or dosya_bilgisi.get("tank_no", ""),
         "sasi": sasi_bul(metin) or dosya_bilgisi.get("sasi", ""),
         "yabanci_plaka": yabanci_plaka_bul(metin) or dosya_bilgisi.get("yabanci_plaka", ""),
-        "tarih": en_mantikli_tarih(metin, tur) or dosya_bilgisi.get("tarih", ""),
+        "tarih": (en_mantikli_tarih(metin, tur) or dosya_bilgisi.get("tarih", "")) if tarih_oku else "",
         "kapasite": kapasite_bul(metin) or dosya_bilgisi.get("kapasite", ""),
         "tank_kodu": tank_kodu_bul(metin) or dosya_bilgisi.get("tank_kodu", ""),
         "surucu": surucu_adi_bul(metin, dosya_adi) or dosya_bilgisi.get("surucu", ""),
@@ -1032,8 +954,10 @@ def yeni_dosya_adi_olustur(tur, bilgi, eski_ad, uzanti):
     un_numaralar = bilgi.get("un_numaralar") or ""
     tur_ad = TUR_DISPLAY.get(tur, tur.replace("_", " "))
 
-    if tur == "ISOPA":
+    if tur in {"ISOPA", "SRC5", "YUKSEKTE CALISABILIR SAGLIK RAPORU"}:
         kimlik = bilgi.get("surucu") or temizle_ad(Path(eski_ad).stem, 40)
+    elif tur in {"T9", "TASIT UYGUNLUK GECICI BELGE", "TASIT UYGUNLUK MUAYENE SERTIFIKASI"}:
+        kimlik = bilgi.get("plaka") or tank_no or bilgi.get("sasi") or temizle_ad(Path(eski_ad).stem, 40)
     else:
         kimlik = (
             tank_no or bilgi.get("plaka") or bilgi.get("sasi") or
@@ -1089,14 +1013,14 @@ def yeni_dosya_adi_olustur(tur, bilgi, eski_ad, uzanti):
 # ----------------------------------------------------------------------------
 # TEK DOSYA ISLEME (ana mantik)
 # ----------------------------------------------------------------------------
-def dosya_isle(dosya_yolu, ana_klasor, ozel_kelimeler=None):
+def dosya_isle(dosya_yolu, ana_klasor, ozel_kelimeler=None, *, ikinci=False):
     """ozel_kelimeler verilmezse, ana_klasor icin kayitli kullanici tanimli
     anahtar kelimeler otomatik olarak diskten okunur (performans icin toplu
     islemlerde bu sozluk bir kere okunup tum dosyalara aynen gecirilir)."""
     if ozel_kelimeler is None:
         ozel_kelimeler = anahtar_kelimeleri_oku(ana_klasor)
     kaynak = Path(dosya_yolu)
-    arsiv = klasorleri_hazirla(ana_klasor)
+    arsiv = Path(ana_klasor)
     eski_ad, uzanti = kaynak.name, kaynak.suffix.lower()
 
     sonuc = {
@@ -1107,6 +1031,21 @@ def dosya_isle(dosya_yolu, ana_klasor, ozel_kelimeler=None):
     }
 
     try:
+        korumali, _ = korumali_klasorleri_oku(arsiv)
+        if any(_klasor_adi_normalize(p) in korumali for p in kaynak.resolve().parts):
+            sonuc["İşlem Durumu"] = "KORUMALI DOSYA ATLANDI"
+            return sonuc
+
+        if _elle_duzeltilmis_mi(eski_ad):
+            sonuc.update({
+                "Yeni Dosya Adı": eski_ad,
+                "Yeni Klasör": str(kaynak.parent),
+                "Belge Türü": BELGE_KLASORLERI.get(kaynak.parent.name)
+                or belge_turu_dosya_adindan(eski_ad) or "",
+                "İşlem Durumu": "ELLE DÜZELTİLDİ - ATLANDI",
+            })
+            return sonuc
+
         if kaynak.name.startswith("~$"):
             sonuc["İşlem Durumu"] = "GECICI DOSYA ATLANDI"
             return sonuc
@@ -1115,97 +1054,55 @@ def dosya_isle(dosya_yolu, ana_klasor, ozel_kelimeler=None):
             sonuc["İşlem Durumu"] = "RAPOR ATLANDI"
             return sonuc
 
-        # ── PDF DEGIL: FARKLI_FORMAT_DOSYALAR'a tasi, hic okuma ────────────
-        if uzanti not in PDF_EXT:
-            hedef = ana_klasor_path(ana_klasor) / "FARKLI FORMAT DOSYALAR"
-            yeni_yol = dosya_tasi(kaynak, hedef)
+        kok = arsiv if uzanti in PDF_EXT else arsiv / "FARKLI FORMAT DOSYALAR" / (uzanti[1:].upper() or "UZANTISIZ")
+        if uzanti not in OKUNABILIR_EXT:
+            yeni_yol = dosya_tasi(kaynak, kok / "DESTEKLENMEYEN", korumali=korumali)
             sonuc.update({
                 "Belge Türü": "FARKLI FORMAT DOSYALAR",
                 "Yeni Dosya Adı": yeni_yol.name,
                 "Yeni Klasör": str(yeni_yol.parent),
-                "İşlem Durumu": "FARKLI FORMAT TASINDI",
+                "İşlem Durumu": "DESTEKLENMEYEN FORMAT",
             })
             return sonuc
 
-        # ── E (elle duzeltilmis): ICERIK OKUNMAZ, sadece konum kontrolu ────
-        if _elle_duzeltilmis_mi(kaynak.name):
-            tur = belge_turu_dosya_adindan(kaynak.name) or "DIGER BELGELER"
-            hedef_klasor = arsiv / BELGE_KLASORLERI.get(tur, "DIGER BELGELER")
-            sonuc["Belge Türü"] = tur
-
-            # Eski "PRGT" kodunu yeni "E" koduna cevir
-            yeni_ad = kaynak.name if _son_token(kaynak.name) == ELLE_DUZELT_KODU else _kod_degistir(kaynak.name, ELLE_DUZELT_KODU)
-
-            if kaynak.parent.resolve() != hedef_klasor.resolve() or yeni_ad != kaynak.name:
-                yeni_yol = dosya_tasi(kaynak, hedef_klasor, yeni_ad)
-                sonuc["Yeni Dosya Adı"] = yeni_yol.name
-                sonuc["Yeni Klasör"] = str(yeni_yol.parent)
-                sonuc["İşlem Durumu"] = "ELLEDUZ TASINDI"
-            else:
-                sonuc["Yeni Dosya Adı"] = kaynak.name
-                sonuc["Yeni Klasör"] = str(kaynak.parent)
-                sonuc["İşlem Durumu"] = "ELLEDUZ DOGRU YERDE"
-            return sonuc
-
-        # ── P (otomatik islenmis): ICERIK OKUNMAZ, sadece konum kontrolu ───
-        if _islenmis_mi(kaynak.name):
-            tur = belge_turu_dosya_adindan(kaynak.name)
-            if not tur:
-                sonuc["İşlem Durumu"] = "ATLANDI TUR BULUNAMADI"
-                return sonuc
-
-            hedef_klasor = arsiv / BELGE_KLASORLERI.get(tur, "DIGER BELGELER")
-            sonuc["Belge Türü"] = tur
-
-            # Eski "S"/"PRGTOK" kodunu yeni "P" koduna cevir
-            yeni_ad = kaynak.name if _son_token(kaynak.name) == ISLEM_KODU else _kod_degistir(kaynak.name, ISLEM_KODU)
-
-            if kaynak.parent.resolve() != hedef_klasor.resolve() or yeni_ad != kaynak.name:
-                yeni_yol = dosya_tasi(kaynak, hedef_klasor, yeni_ad)
-                sonuc["Yeni Dosya Adı"] = yeni_yol.name
-                sonuc["Yeni Klasör"] = str(yeni_yol.parent)
-                sonuc["İşlem Durumu"] = "YER DUZELTILDI"
-            else:
-                sonuc["Yeni Dosya Adı"] = kaynak.name
-                sonuc["Yeni Klasör"] = str(kaynak.parent)
-                sonuc["İşlem Durumu"] = "ATLANDI ZATEN ISLENMIS"
-            return sonuc
-
-        # ── KOD YOK: PDF icerigini oku, turu bul, yeniden adlandir ─────────
         try:
-            metin = pdf_text_oku(str(kaynak), max_sayfa=6)
-        except Exception as e:
-            metin = ""
-            sonuc["Hata"] = f"OKUMA_HATASI: {e}"
-
-        tur = belge_turu_bul(metin, eski_ad, ozel_kelimeler)
-
-        # Ilk sayfalarda yeterli bilgi yoksa PDF'in tamamini oku
-        if tur == "DIGER BELGELER" and not yabanci_plaka_bul(metin):
-            try:
-                metin_tam = pdf_text_oku(str(kaynak))
-                if len(metin_tam) > len(metin):
-                    metin = metin_tam
-                    tur = belge_turu_bul(metin, eski_ad, ozel_kelimeler)
-            except Exception:
-                pass
-
-        bilgi = bilgi_cek(metin, eski_ad, ozel_kelimeler)
-
-        # Metin hic okunamadiysa -> OKUNAMAYAN_PDF klasorune at (isim degismez)
-        if not metin and tur == "DIGER BELGELER":
-            hedef = ana_klasor_path(ana_klasor) / "OKUNAMAYAN PDF"
-            yeni_yol = dosya_tasi(kaynak, hedef)
+            metin, serit = _belge_oku(kaynak, ikinci=True) if ikinci else _belge_oku(kaynak)
+        except Exception as hata:
+            metin, serit = "", False
+            sonuc["Hata"] = str(hata)
+        tur = belge_turu_bul(metin, ozel_kelimeler=ozel_kelimeler, kirmizi_serit=serit)
+        bilgi = bilgi_cek(metin, ozel_kelimeler=ozel_kelimeler, tur=tur, tarih_oku=uzanti in PDF_EXT)
+        kimlik = (
+            bilgi["surucu"] if tur in {"ISOPA", "SRC5", "YUKSEKTE CALISABILIR SAGLIK RAPORU"}
+            else bilgi["plaka"] or bilgi["sasi"] if tur in {"RUHSAT", "TASIT KARTI"}
+            else bilgi["yabanci_plaka"] if tur == "YABANCI PLAKA"
+            else bilgi["tank_no"] or bilgi["plaka"] or bilgi["sasi"]
+        )
+        if not metin or tur == "DIGER BELGELER" or not kimlik:
+            if uzanti in PDF_EXT and not ikinci:
+                return None
+            if uzanti in PDF_EXT or tur == "DIGER BELGELER":
+                hedef = kok / ("OKUNAMAYAN PDF" if uzanti in PDF_EXT else "INCELENECEK")
+            else:
+                hedef = kok / BELGE_KLASORLERI[tur]
+            yeni_yol = dosya_tasi(kaynak, hedef, korumali=korumali)
             sonuc.update({
-                "Belge Türü": "OKUNAMAYAN PDF",
+                "Belge Türü": tur,
                 "Yeni Dosya Adı": yeni_yol.name,
                 "Yeni Klasör": str(yeni_yol.parent),
-                "İşlem Durumu": "OKUNAMADI TASINDI",
+                "İşlem Durumu": "KONTROL GEREKLI",
             })
             return sonuc
 
+        if tur in {"RUHSAT", "TASIT KARTI"}:
+            bilgi["tank_no"] = ""
+        if uzanti in PDF_EXT:
+            sinir = _pdf_son_gun(metin, tur, bilgi["tarih"])
+            sonuc["_tarih_siniri"] = sinir
+            if sinir and sinir < date.today():
+                kok = arsiv / TARIHI_GECMIS
         yeni_ad = yeni_dosya_adi_olustur(tur, bilgi, eski_ad, uzanti)
-        yeni_yol = dosya_tasi(kaynak, arsiv / BELGE_KLASORLERI.get(tur, "DIGER BELGELER"), yeni_ad)
+        yeni_yol = dosya_tasi(kaynak, kok / BELGE_KLASORLERI[tur], yeni_ad, korumali=korumali)
 
         sonuc.update({
             "Yeni Dosya Adı": yeni_yol.name,
@@ -1219,7 +1116,7 @@ def dosya_isle(dosya_yolu, ana_klasor, ozel_kelimeler=None):
             "Tank Kodu": bilgi.get("tank_kodu", ""),
             "Sürücü": bilgi.get("surucu", ""),
             "Yeni Klasör": str(yeni_yol.parent),
-            "İşlem Durumu": "OKUNDU TASINDI",
+            "İşlem Durumu": "TARİHİ GEÇMİŞ" if kok == arsiv / TARIHI_GECMIS else "OKUNDU TASINDI",
         })
         return sonuc
 
@@ -1229,101 +1126,279 @@ def dosya_isle(dosya_yolu, ana_klasor, ozel_kelimeler=None):
         return sonuc
 
 
-def ana_klasor_path(ana_klasor):
-    return Path(ana_klasor)
-
-
-# ----------------------------------------------------------------------------
-# TARAMA (klasor agaci uzerinde calisir)
-# ----------------------------------------------------------------------------
-def klasor_tara(ana_klasor, log_callback=None, progress_callback=None):
-    """progress_callback(islenen, toplam) seklinde cagrilir; arayuzde
-    ilerleme cubugu / 'X/Y dosya islendi' bilgisini gostermek icin kullanilir.
-
-    GUNLUK / HIZLI TARAMA: Bu fonksiyon artik SADECE henuz siniflandirilmamis
-    (Taramalar ana klasorune duz/loose olarak dusen) yeni dosyalari kontrol
-    eder. Zaten siniflandirilmis oldugu bilinen arsiv klasorlerinin (T9,
-    TANK BASINC RAPORU, OKUNAMAYAN PDF, ISLEM RAPORLARI, vb.) ICINE HIC
-    GIRILMEZ; bu yuzden arsivde binlerce klasor/dosya birikmis olsa bile
-    tarama suresi sadece o gun eklenen yeni dosya sayisina baglidir, arsivin
-    toplam buyuklugune degil.
-
-    Zaten siniflandirilmis TUM dosyalarin icerigini/yerini yeniden kontrol
-    etmek icin (ornegin dosyalar elle yanlis klasore tasindiysa) ayri ve
-    bilerek tetiklenen `tum_dosyalari_yeniden_tara()` fonksiyonu kullanilir
-    (arayuzde 'Tumunu Yeniden Tara' butonu - bunun uzun surecegi konusunda
-    kullaniciya ayrica uyari gosterilir)."""
-    arsiv = klasorleri_hazirla(ana_klasor)
-    sonuclar = []
-    ana = Path(ana_klasor)
-
-    # Tarama sirasinda atlanan klasorler: TUM bilinen/siniflandirilmis arsiv
-    # klasorleri + sistem klasorleri. Gunluk tarama bunlarin ICINE HIC GIRMEZ
-    # (os.walk bu klasorlerde asagi inmez), sadece ana klasorun kendisinde
-    # (ve taninmayan/yeni herhangi bir alt klasorde) duran, henuz
-    # siniflandirilmamis dosyalari islemeye alir.
-    korumali_klasor_kumesi, _ = korumali_klasorleri_oku(ana_klasor)
-    ATLA_KLASORLER = {
-        _klasor_adi_normalize(x)
-        for x in (
-            set(BELGE_KLASORLERI.values())
-            | {"FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI"}
-            | ESKI_T9_TURLERI
-        )
-    } | korumali_klasor_kumesi
-
-    dosya_listesi = []
+def _tarama_dosyalari(ana, atla):
     for root, dirs, files in os.walk(ana):
-        root_path = Path(root)
-        if any(_klasor_adi_normalize(p) in ATLA_KLASORLER for p in root_path.parts):
-            dirs[:] = []
-            continue
-        for file in files:
-            yol = root_path / file
-            if yol.name.startswith("~$"):
-                continue
-            dosya_listesi.append(yol)
+        kok = Path(root)
+        dirs[:] = sorted(d for d in dirs if _klasor_adi_normalize(d) not in atla and not (kok / d).is_symlink())
+        for ad in sorted(files):
+            yol = kok / ad
+            if not ad.startswith("~$") and not yol.is_symlink():
+                yield yol
 
-    toplam = len(dosya_listesi)
-    islenen_sayac = {"n": 0}
-    sayac_kilidi = threading.Lock()
-    ozel_kelimeler = anahtar_kelimeleri_oku(ana_klasor)
 
-    def _ilerleme_bildir():
-        with sayac_kilidi:
-            islenen_sayac["n"] += 1
-            n = islenen_sayac["n"]
-        if progress_callback:
-            progress_callback(n, toplam)
-
-    if toplam > 1:
-        max_worker = min(4, max(1, os.cpu_count() or 1))
-        with ThreadPoolExecutor(max_workers=max_worker) as ex:
-            future_map = {ex.submit(dosya_isle, str(yol), ana_klasor, ozel_kelimeler): yol for yol in dosya_listesi}
-            for fut in as_completed(future_map):
-                sonuc = fut.result()
-                sonuclar.append(sonuc)
-                _ilerleme_bildir()
-                if log_callback:
-                    log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
-    else:
-        for yol in dosya_listesi:
-            sonuc = dosya_isle(str(yol), ana_klasor, ozel_kelimeler)
-            sonuclar.append(sonuc)
-            _ilerleme_bildir()
-            if log_callback:
-                log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
-
-    df = pd.DataFrame(sonuclar)
-    rapor_klasor = ana / "ISLEM RAPORLARI"
-    rapor_klasor.mkdir(exist_ok=True)
-    # Rapor adi: gun ve saat bilgisiyle (ornek: ISLEM_RAPORU_16-06-2026_09-04-12.xlsx)
-    rapor_adi = f"ISLEM RAPORU {datetime.now().strftime('%d-%m-%Y %H-%M-%S')}.xlsx"
+def _rapor_yaz(ana, sonuclar, baslik):
+    df = pd.DataFrame(sonuclar).drop(columns="_tarih_siniri", errors="ignore")
     if not df.empty:
-        df.to_excel(rapor_klasor / rapor_adi, index=False)
-        df.to_excel(rapor_klasor / "ARSIV INDEX.xlsx", index=False)
-    _son_tarama_bilgisini_kaydet(ana_klasor, toplam)
+        rapor = ana / "ISLEM RAPORLARI" / f"{baslik} {datetime.now():%d-%m-%Y %H-%M-%S}.xlsx"
+        df.to_excel(rapor, index=False)
+        _index_guncelle(ana, df)
     return df
+
+
+def _tarama_yurut(ana, dosyalar, rapor_adi, log_callback, progress_callback):
+    ozel = anahtar_kelimeleri_oku(ana)
+    sonuclar = {}
+    korumali, _ = korumali_klasorleri_oku(ana)
+    okunamayan = ana / "OKUNAMAYAN PDF"
+    ikinci_tur = {
+        yol for yol in _tarama_dosyalari(okunamayan, korumali)
+        if yol.suffix.lower() in PDF_EXT and not _elle_duzeltilmis_mi(yol.name)
+    } if okunamayan.name not in korumali and not okunamayan.is_symlink() else set()
+    ikinci_tur.difference_update(dosyalar)
+    toplam = len(dosyalar)
+
+    def kaydet(sonuc):
+        konum = Path(sonuc["Yeni Klasör"]) / sonuc["Yeni Dosya Adı"]
+        if not sonuc["Yeni Dosya Adı"]:
+            konum = Path(sonuc["Bulunduğu Klasör"]) / sonuc["Eski Dosya Adı"]
+        sonuclar[konum] = sonuc
+        if log_callback:
+            log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']}")
+
+    with ThreadPoolExecutor(max_workers=min(2, max(1, (os.cpu_count() or 1) - 1))) as havuz:
+        bekleyen = {havuz.submit(dosya_isle, yol, ana, ozel): yol for yol in dosyalar}
+        for sayi, islem in enumerate(as_completed(bekleyen), 1):
+            sonuc = islem.result()
+            if sonuc is None:
+                ikinci_tur.add(bekleyen[islem])
+            else:
+                kaydet(sonuc)
+            if progress_callback:
+                progress_callback(sayi, toplam)
+        if ikinci_tur and log_callback:
+            log_callback(f"İkinci OCR taraması: {len(ikinci_tur)} PDF")
+        bekleyen = [havuz.submit(dosya_isle, yol, ana, ozel, ikinci=True) for yol in sorted(ikinci_tur)]
+        for sayi, islem in enumerate(as_completed(bekleyen), 1):
+            kaydet(islem.result())
+            if progress_callback:
+                progress_callback(sayi, len(ikinci_tur))
+
+    _pdf_arsivi_duzenle(ana, sonuclar, log_callback, progress_callback)
+    _son_tarama_bilgisini_kaydet(ana, toplam)
+    return _rapor_yaz(ana, sonuclar.values(), rapor_adi)
+
+
+def klasor_tara(ana_klasor, log_callback=None, progress_callback=None):
+    ana = klasorleri_hazirla(ana_klasor)
+    korumali, _ = korumali_klasorleri_oku(ana)
+    atla = korumali | set(BELGE_KLASORLERI.values()) | ESKI_T9_TURLERI | {
+        "FARKLI FORMAT DOSYALAR", "OKUNAMAYAN PDF", "ISLEM RAPORLARI", ESKI_DOSYALAR, TARIHI_GECMIS,
+    }
+    return _tarama_yurut(ana, list(_tarama_dosyalari(ana, atla)), "ISLEM RAPORU", log_callback, progress_callback)
+
+
+def _tarih_degeri(deger):
+    try:
+        return datetime.strptime(deger, "%d.%m.%Y").date()
+    except (ValueError, TypeError):
+        if isinstance(deger, str) and re.fullmatch(r"(?:0[1-9]|1[0-2])\.\d{4}", deger):
+            ay, yil = map(int, deger.split("."))
+            if yil:
+                return date(yil, ay, monthrange(yil, ay)[1])
+        return None
+
+
+def _pdf_son_gun(metin, tur, gecerlilik=""):
+    """Son geçerlilik" önceliklidir. Düzenleme tarihine bir takvim ayı eklenir."""
+    duz = _klasor_adi_normalize(" ".join(metin.split()))
+    acik_tarih = re.search(
+        r"\b(?:GECERLILIK TARIHI|GECERLILIK BITIS TARIHI|VALID UNTIL|EXPIRY DATE|EXPIRATION DATE)"
+        r"\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4}|\d{4}[./-]\d{2}[./-]\d{2})", duz
+    )
+    if acik_tarih:
+        return _tarih_degeri(tarih_formatla(acik_tarih[1]))
+    onay = gecerlilik or en_mantikli_tarih(metin, tur)
+    if onay:
+        return _tarih_degeri(onay)
+    if re.search(r"\b(?:GECERLILIK TARIHI|BITIS TARIHI|VALID UNTIL|EXPIRY DATE|EXPIRATION DATE)\b", duz):
+        return None
+    duzenleme = re.search(
+        r"\b(?:DUZENLEME TARIHI|BELGE DUZENLEME TARIHI|YAPILIS TARIHI|ISSUE DATE|DATE OF ISSUE)"
+        r"\s*[:\-]?\s*(\d{2}[./-]\d{2}[./-]\d{4}|\d{4}[./-]\d{2}[./-]\d{2})", duz
+    )
+    gun = _tarih_degeri(tarih_formatla(duzenleme[1])) if duzenleme else None
+    if gun:
+        yil, ay = (gun.year + 1, 1) if gun.month == 12 else (gun.year, gun.month + 1)
+        return date(yil, ay, min(gun.day, monthrange(yil, ay)[1]))
+    return None
+
+
+def _gecmis_adini_temizle(ad):
+    return re.sub(r"^\d{3,} - ", "", ad)
+
+
+def _pdf_kimligi(yol, tur, kayit):
+    alanlar = (
+        ("Sürücü",) if tur in {"ISOPA", "SRC5", "YUKSEKTE CALISABILIR SAGLIK RAPORU"}
+        else ("Tank No",) if tur == "TANK BASINC RAPORU"
+        else ("Yabancı Plaka",) if tur == "YABANCI PLAKA"
+        else ("Plaka", "Tank No", "Şasi No")
+    )
+    for alan in alanlar:
+        if kayit.get(alan):
+            return _fp(kayit[alan]).replace(" ", "")
+    # Yalnızca içeriğiyle sınıflandırılan araç PDF'lerinin başındaki kimliği kullan.
+    ad = _gecmis_adini_temizle(yol.name)
+    if not re.search(r"(?:^|[ _-])(?:P|S|PRGTOK)(?:_\d+)?\.pdf$", ad, re.I):
+        return ""
+    ad = re.split(r"\s+\d{2}\.\d{2}\.\d{4}\b", Path(ad).stem, maxsplit=1)[0]
+    etiket = TUR_DISPLAY.get(tur, tur)
+    ad = re.split(r"\s+" + re.escape(etiket) + r"\b", ad, maxsplit=1, flags=re.I)[0]
+    ad = re.sub(r"\s+(?:P|S|PRGTOK)(?:_\d+)?$", "", ad, flags=re.I)
+    if tur in {"ISOPA", "SRC5", "YUKSEKTE CALISABILIR SAGLIK RAPORU"}:
+        return _fp(ad).replace(" ", "") if anlamli_kimlik_mi(ad) else ""
+    aday = ad.split()[0] if ad.split() else ""
+    kimlik = plaka_bul(aday) or tank_no_bul(aday) or sasi_bul(aday)
+    if tur == "YABANCI PLAKA":
+        kimlik = yabanci_plaka_bul(aday)
+    return _fp(kimlik).replace(" ", "")
+
+
+def _yukleme_anahtari(yol):
+    bilgi = yol.stat()
+    # Windows/macOS oluşturma zamanı. Oluşturma zamanı olmayan sistemlerde
+    # taşıma sırasında değişmeyen dosya değiştirme zamanı kullanılır.
+    return getattr(bilgi, "st_birthtime", bilgi.st_mtime), bilgi.st_mtime, yol.name.casefold()
+
+
+def _pdf_arsivi_duzenle(ana, sonuclar, log_callback, progress_callback, *, yalniz_tarih=False):
+    korumali, _ = korumali_klasorleri_oku(ana)
+    atla = korumali | {"FARKLI FORMAT DOSYALAR", "ISLEM RAPORLARI", TARIHI_GECMIS}
+    ozel = anahtar_kelimeleri_oku(ana)
+    try:
+        onceki = {
+            Path(kayit["Yeni Klasör"]) / kayit["Yeni Dosya Adı"]: kayit
+            for kayit in _mevcut_arsiv_kayitlari(ana).to_dict("records")
+        }
+    except (OSError, KeyError, ValueError):
+        onceki = {}
+    gruplar = {}
+    bugun = date.today()
+    pdfler = [yol for yol in _tarama_dosyalari(ana, atla)
+              if yol.suffix.lower() in PDF_EXT and not _elle_duzeltilmis_mi(yol.name)]
+    if log_callback:
+        log_callback("PDF tarihleri kontrol ediliyor…")
+
+    def tasi(yol, hedef, ad, tur, neden, tarih=""):
+        kayit = sonuclar.get(yol, onceki.get(yol, {}))
+        try:
+            yeni = dosya_tasi(yol, hedef, ad, korumali=korumali)
+        except (OSError, ValueError) as hata:
+            sonuclar[yol] = {
+                **kayit, "Eski Dosya Adı": kayit.get("Eski Dosya Adı", yol.name),
+                "Bulunduğu Klasör": str(yol.parent), "Yeni Dosya Adı": yol.name,
+                "Yeni Klasör": str(yol.parent), "Belge Türü": tur,
+                "İşlem Durumu": "HATA", "Hata": str(hata),
+            }
+            return yol
+        if yeni == yol and not yalniz_tarih:
+            return yol
+        sonuclar.pop(yol, None)
+        sonuclar[yeni] = {
+            **kayit, "Eski Dosya Adı": kayit.get("Eski Dosya Adı", yol.name),
+            "Bulunduğu Klasör": kayit.get("Bulunduğu Klasör", str(yol.parent)),
+            "Yeni Dosya Adı": yeni.name, "Yeni Klasör": str(yeni.parent),
+            "Belge Türü": tur, "İşlem Durumu": neden,
+            "Geçerlilik Tarihi": kayit.get("Geçerlilik Tarihi") or tarih,
+            "İşlem Tarihi": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
+        }
+        return yeni
+
+    for sayi, yol in enumerate(pdfler, 1):
+        if progress_callback:
+            progress_callback(sayi, len(pdfler))
+        kayit = sonuclar.get(yol, onceki.get(yol, {}))
+        if yol.parent.name == "OKUNAMAYAN PDF" and not yalniz_tarih:
+            continue
+        tur = BELGE_KLASORLERI.get(yol.parent.name) or kayit.get("Belge Türü") or ""
+        etiketli = bool(re.search(r"(?:^|[ _-])P(?:_\d+)?\.pdf$", yol.name, re.I))
+        ad_tarih = re.search(r"(?<![\d.])((?:\d{2}\.)?\d{2}\.\d{4})(?![\d.])", yol.stem) if etiketli else None
+        son_gun = kayit.get("_tarih_siniri")
+        gercek_tarih = kayit.get("Geçerlilik Tarihi", "")
+        if not son_gun and ad_tarih:
+            gercek_tarih = ad_tarih[1]
+            son_gun = _tarih_degeri(gercek_tarih)
+        hata = ""
+        if not son_gun and "_tarih_siniri" not in kayit:
+            try:
+                metin, serit = _belge_oku(yol)
+                tur = tur or belge_turu_bul(metin, ozel_kelimeler=ozel, kirmizi_serit=serit)
+                gercek_tarih = en_mantikli_tarih(metin, tur)
+                son_gun = _pdf_son_gun(metin, tur, gercek_tarih)
+            except (RuntimeError, ValueError, OSError, subprocess.TimeoutExpired) as e:
+                hata = str(e)
+        if son_gun and son_gun < bugun:
+            tasi(yol, ana / TARIHI_GECMIS / (tur or "DIGER BELGELER"),
+                 _gecmis_adini_temizle(yol.name), tur or "DIGER BELGELER", "TARİHİ GEÇMİŞ", gercek_tarih)
+            continue
+        if yalniz_tarih:
+            sonuclar[yol] = {
+                **kayit,
+                "Eski Dosya Adı": yol.name, "Yeni Dosya Adı": yol.name,
+                "Bulunduğu Klasör": str(yol.parent), "Yeni Klasör": str(yol.parent),
+                "Belge Türü": tur, "Geçerlilik Tarihi": gercek_tarih,
+                "İşlem Durumu": "OKUMA HATASI" if hata else ("TARİH KONTROL EDİLDİ" if son_gun else "TARİH BULUNAMADI"),
+                "Hata": hata, "İşlem Tarihi": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
+            }
+            continue
+        if not tur or tur == "DIGER BELGELER":
+            continue
+        in_history = ESKI_DOSYALAR in yol.relative_to(ana).parts
+        if yol.parent != ana / tur and not in_history:
+            continue
+        kimlik = _pdf_kimligi(yol, tur, kayit)
+        if kimlik:
+            gruplar.setdefault((tur, kimlik), []).append((yol, in_history))
+
+    for (tur, _), dosyalar in gruplar.items():
+        yuklemeler = []
+        for yol, arsivde in dosyalar:
+            try:
+                yuklemeler.append((_yukleme_anahtari(yol), yol, arsivde))
+            except FileNotFoundError:
+                continue
+        sirali = [(yol, arsivde) for _, yol, arsivde in sorted(yuklemeler)]
+        etkin = [yol for yol, arsivde in sirali if not arsivde]
+        guncel = etkin[-1] if etkin else None
+        plan = {}
+        gecmis = (yol for yol, _ in sirali if yol != guncel)
+        for sira, yol in enumerate(gecmis, 1):
+            hedef = ana / ESKI_DOSYALAR / tur / f"{sira:03d} - {_gecmis_adini_temizle(yol.name)}"
+            if yol != hedef:
+                plan[yol] = hedef
+        while plan:
+            # Önce yeri boşaltılacak belgeleri taşı. Aynı adlı dosyalara
+            # dosya taşıma işlevi güvenli bir çakışma eki ekler.
+            yol = next((anahtar for anahtar, hedef in plan.items() if hedef not in plan), next(iter(plan)))
+            hedef = plan.pop(yol)
+            tasi(yol, hedef.parent, hedef.name, tur, "ESKİ SÜRÜM")
+
+
+def tarih_kontrolu(ana_klasor, log_callback=None, progress_callback=None):
+    ana = klasorleri_hazirla(ana_klasor)
+    sonuclar = {}
+    _pdf_arsivi_duzenle(ana, sonuclar, log_callback, progress_callback, yalniz_tarih=True)
+    return _rapor_yaz(ana, sonuclar.values(), "TARIH KONTROLU")
+
+
+def _index_guncelle(ana, yeni):
+    yol = ana / "ISLEM RAPORLARI" / "ARSIV INDEX.xlsx"
+    onceki = _mevcut_arsiv_kayitlari(ana)
+    birlesik = pd.concat([onceki, yeni], ignore_index=True)
+    birlesik = birlesik.drop_duplicates(["Yeni Klasör", "Yeni Dosya Adı"], keep="last")
+    gecici = yol.with_name(".ARSIV INDEX.tmp.xlsx")
+    birlesik.to_excel(gecici, index=False)
+    gecici.replace(yol)
 
 
 def _son_tarama_bilgisini_kaydet(ana_klasor, dosya_sayisi):
@@ -1358,171 +1433,21 @@ def son_tarama_bilgisi_oku(ana_klasor):
 
 
 def zorla_yeniden_oku(ana_klasor, log_callback=None, progress_callback=None):
-    """OKUNAMAYAN_PDF klasorundeki dosyalari (P/E kodlari silinerek) tekrar
-    icerikten okumaya zorlar. FARKLI_FORMAT_DOSYALAR'a dokunmaz (PDF degil)."""
-    ana = Path(ana_klasor)
+    ana = klasorleri_hazirla(ana_klasor)
+    korumali, _ = korumali_klasorleri_oku(ana)
     okunamayan = ana / "OKUNAMAYAN PDF"
-    sonuclar = []
-    ozel_kelimeler = anahtar_kelimeleri_oku(ana_klasor)
-
-    dosya_listesi = []
-    if okunamayan.exists():
-        dosya_listesi = [d for d in okunamayan.iterdir() if d.is_file() and d.suffix.lower() in PDF_EXT]
-
-    toplam = len(dosya_listesi)
-    for i, dosya in enumerate(dosya_listesi, start=1):
-        sonuc = dosya_isle(str(dosya), ana_klasor, ozel_kelimeler)
-        sonuclar.append(sonuc)
-        if log_callback:
-            log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
-        if progress_callback:
-            progress_callback(i, toplam)
-
-    df = pd.DataFrame(sonuclar)
-    if not df.empty:
-        rapor_klasor = ana / "ISLEM RAPORLARI"
-        rapor_klasor.mkdir(exist_ok=True)
-        rapor_adi = f"OKUNAMAYAN TEKRAR DENE {datetime.now().strftime('%d-%m-%Y %H-%M-%S')}.xlsx"
-        df.to_excel(rapor_klasor / rapor_adi, index=False)
-    return df
+    dosyalar = [] if okunamayan.name in korumali or not okunamayan.is_dir() else [
+        yol for yol in _tarama_dosyalari(okunamayan, korumali) if yol.suffix.lower() in PDF_EXT
+    ]
+    return _tarama_yurut(ana, dosyalar, "OKUNAMAYAN TEKRAR DENE", log_callback, progress_callback)
 
 
 def tum_dosyalari_yeniden_tara(ana_klasor, log_callback=None, progress_callback=None):
-    """TUM PDF dosyalarini (P/E kodu olsa da) iceriklerinden yeniden okur ve
-    yeniden siniflandirir. Eski T9 alt klasorlerini birlesik T9'a tasir."""
-    ana = Path(ana_klasor)
-    arsiv = klasorleri_hazirla(ana_klasor)
-    sonuclar = []
-    ozel_kelimeler = anahtar_kelimeleri_oku(ana_klasor)
-
-    korumali_klasor_kumesi, _ = korumali_klasorleri_oku(ana_klasor)
-    ATLA_KLASORLER = {
-        _klasor_adi_normalize(x)
-        for x in (
-            {"FARKLI FORMAT DOSYALAR", "ISLEM RAPORLARI"}
-        )
-    } | korumali_klasor_kumesi
-
-    dosya_listesi = []
-    for root, dirs, files in os.walk(ana):
-        root_path = Path(root)
-        if any(_klasor_adi_normalize(p) in ATLA_KLASORLER for p in root_path.parts):
-            dirs[:] = []
-            continue
-        for file in files:
-            yol = root_path / file
-            if yol.name.startswith("~$"):
-                continue
-            if yol.suffix.lower() in PDF_EXT:
-                dosya_listesi.append(yol)
-
-    def yeniden_isle(dosya_yolu):
-        """Kod kontrolu yapmadan, dogrudan icerikten okuyup yeniden adlandirir."""
-        kaynak = Path(dosya_yolu)
-        eski_ad, uzanti = kaynak.name, kaynak.suffix.lower()
-        sonuc = {
-            "Eski Dosya Adı": eski_ad, "Yeni Dosya Adı": "", "Belge Türü": "", "Plaka": "", "Tank No": "",
-            "Şasi No": "", "Yabancı Plaka": "", "Geçerlilik Tarihi": "", "Kapasite": "", "Tank Kodu": "",
-            "Sürücü": "", "Bulunduğu Klasör": str(kaynak.parent), "Yeni Klasör": "", "İşlem Durumu": "",
-            "Hata": "", "İşlem Tarihi": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
-        }
-        try:
-            # E kodluysa icerik yine de zorla okunur (bu fonksiyonun amaci budur)
-            try:
-                metin = pdf_text_oku(str(kaynak))
-            except Exception as e:
-                metin = ""
-                sonuc["Hata"] = f"OKUMA_HATASI: {e}"
-
-            tur = belge_turu_bul(metin, eski_ad, ozel_kelimeler)
-            bilgi = bilgi_cek(metin, eski_ad, ozel_kelimeler)
-
-            if not metin and tur == "DIGER BELGELER":
-                hedef = ana / "OKUNAMAYAN PDF"
-                yeni_yol = dosya_tasi(kaynak, hedef)
-                sonuc.update({
-                    "Belge Türü": "OKUNAMAYAN PDF",
-                    "Yeni Dosya Adı": yeni_yol.name,
-                    "Yeni Klasör": str(yeni_yol.parent),
-                    "İşlem Durumu": "OKUNAMADI TASINDI",
-                })
-                return sonuc
-
-            # Onceden E ile isaretliyse, yeniden taramada da E olarak kalsin
-            korunacak_kod = ELLE_DUZELT_KODU if _elle_duzeltilmis_mi(eski_ad) else ISLEM_KODU
-            yeni_ad = yeni_dosya_adi_olustur(tur, bilgi, eski_ad, uzanti)
-            if korunacak_kod == ELLE_DUZELT_KODU:
-                yeni_ad = _kod_degistir(yeni_ad, ELLE_DUZELT_KODU)
-
-            yeni_yol = dosya_tasi(kaynak, arsiv / BELGE_KLASORLERI.get(tur, "DIGER BELGELER"), yeni_ad)
-            sonuc.update({
-                "Yeni Dosya Adı": yeni_yol.name,
-                "Belge Türü": tur,
-                "Plaka": bilgi.get("plaka", ""),
-                "Tank No": bilgi.get("tank_no", ""),
-                "Şasi No": bilgi.get("sasi", ""),
-                "Yabancı Plaka": bilgi.get("yabanci_plaka", ""),
-                "Geçerlilik Tarihi": bilgi.get("tarih", ""),
-                "Kapasite": bilgi.get("kapasite", ""),
-                "Tank Kodu": bilgi.get("tank_kodu", ""),
-                "Sürücü": bilgi.get("surucu", ""),
-                "Yeni Klasör": str(yeni_yol.parent),
-                "İşlem Durumu": "YENIDEN TARANDI",
-            })
-            return sonuc
-        except Exception as e:
-            sonuc["İşlem Durumu"] = "HATA"
-            sonuc["Hata"] = str(e)
-            return sonuc
-
-    toplam = len(dosya_listesi)
-    islenen_sayac = {"n": 0}
-    sayac_kilidi = threading.Lock()
-
-    def _ilerleme_bildir():
-        with sayac_kilidi:
-            islenen_sayac["n"] += 1
-            n = islenen_sayac["n"]
-        if progress_callback:
-            progress_callback(n, toplam)
-
-    if toplam > 1:
-        max_worker = min(4, max(1, os.cpu_count() or 1))
-        with ThreadPoolExecutor(max_workers=max_worker) as ex:
-            future_map = {ex.submit(yeniden_isle, yol): yol for yol in dosya_listesi}
-            for fut in as_completed(future_map):
-                sonuc = fut.result()
-                sonuclar.append(sonuc)
-                _ilerleme_bildir()
-                if log_callback:
-                    log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
-    else:
-        for yol in dosya_listesi:
-            sonuc = yeniden_isle(yol)
-            sonuclar.append(sonuc)
-            _ilerleme_bildir()
-            if log_callback:
-                log_callback(f"{sonuc['İşlem Durumu']}: {sonuc['Eski Dosya Adı']} -> {sonuc.get('Yeni Dosya Adı', '')}")
-
-    # Eski T9 alt klasorleri bossa sil
-    for eski_ad in ESKI_T9_TURLERI:
-        eski_klasor = arsiv / eski_ad
-        if eski_klasor.exists() and eski_klasor.is_dir():
-            try:
-                if not any(eski_klasor.iterdir()):
-                    eski_klasor.rmdir()
-            except OSError:
-                pass
-
-    df = pd.DataFrame(sonuclar)
-    if not df.empty:
-        rapor_klasor = ana / "ISLEM RAPORLARI"
-        rapor_klasor.mkdir(exist_ok=True)
-        rapor_adi = f"TUMUNU YENIDEN TARA {datetime.now().strftime('%d-%m-%Y %H-%M-%S')}.xlsx"
-        df.to_excel(rapor_klasor / rapor_adi, index=False)
-        df.to_excel(rapor_klasor / "ARSIV INDEX.xlsx", index=False)
-    _son_tarama_bilgisini_kaydet(ana_klasor, toplam)
-    return df
+    ana = klasorleri_hazirla(ana_klasor)
+    korumali, _ = korumali_klasorleri_oku(ana)
+    atla = korumali | {"ISLEM RAPORLARI", ESKI_DOSYALAR, TARIHI_GECMIS}
+    dosyalar = [yol for yol in _tarama_dosyalari(ana, atla) if yol.suffix.lower() in OKUNABILIR_EXT]
+    return _tarama_yurut(ana, dosyalar, "TUMUNU YENIDEN TARA", log_callback, progress_callback)
 
 
 # ----------------------------------------------------------------------------
@@ -1539,44 +1464,47 @@ def ozet_sayilar(ana_klasor):
 
     for tur, klasor_adi in BELGE_KLASORLERI.items():
         klasor = arsiv / klasor_adi
-        sayi = len(list(klasor.glob("*.pdf"))) if klasor.exists() else 0
+        sayi = sum(p.is_file() and p.suffix.lower() in PDF_EXT for p in klasor.iterdir()) if klasor.exists() else 0
         ozet[tur] = ozet.get(tur, 0) + sayi
         ozet["TOPLAM"] += sayi
 
-    farkli_format = ana / "FARKLI FORMAT DOSYALAR"
-    ozet["FARKLI FORMAT DOSYALAR"] = len(list(farkli_format.iterdir())) if farkli_format.exists() else 0
+    korumali, _ = korumali_klasorleri_oku(ana)
+    farkli_adet = 0
+    for root, dirs, files in os.walk(ana / "FARKLI FORMAT DOSYALAR"):
+        dirs[:] = [d for d in dirs if _klasor_adi_normalize(d) not in korumali]
+        klasor = Path(root).name
+        sayi = sum(not name.startswith("~$") for name in files)
+        farkli_adet += sayi
+        if klasor in BELGE_KLASORLERI:
+            ozet[klasor] += sayi
+            ozet["TOPLAM"] += sayi
+    ozet["FARKLI FORMAT DOSYALAR"] = farkli_adet
+
+    for tur in (ESKI_DOSYALAR, TARIHI_GECMIS):
+        hedef = ana / tur
+        ozet[tur] = sum(yol.suffix.lower() in PDF_EXT for yol in _tarama_dosyalari(hedef, korumali)) if tur not in korumali else 0
 
     okunamayan = ana / "OKUNAMAYAN PDF"
-    ozet["OKUNAMAYAN PDF"] = len(list(okunamayan.glob("*.pdf"))) if okunamayan.exists() else 0
+    ozet["OKUNAMAYAN PDF"] = sum(p.is_file() and p.suffix.lower() in PDF_EXT for p in okunamayan.iterdir()) if okunamayan.exists() else 0
 
     return ozet
 
 
 # ----------------------------------------------------------------------------
-# ARAMA
+# ARSIV INDEX
 # ----------------------------------------------------------------------------
-def arama_yap(ana_klasor, sorgu):
+def _mevcut_arsiv_kayitlari(ana_klasor):
     index_yolu = Path(ana_klasor) / "ISLEM RAPORLARI" / "ARSIV INDEX.xlsx"
     if not index_yolu.exists():
         return pd.DataFrame()
 
     df = pd.read_excel(index_yolu).fillna("")
 
-    def _tam_yol(row):
+    def dosya_mevcut(row):
         klasor = str(row.get("Yeni Klasör", "")).strip()
         ad = str(row.get("Yeni Dosya Adı", "")).strip()
-        return os.path.join(klasor, ad) if klasor and ad else ""
+        return bool(klasor and ad) and (Path(klasor) / ad).is_file()
 
-    df["Tam Yol"] = df.apply(_tam_yol, axis=1)
-
-    if not sorgu:
+    if df.empty:
         return df
-
-    q = temizle_ad(sorgu).replace("_", "")
-
-    def satirda_var(row):
-        alan = " ".join(str(x) for x in row.values).upper()
-        alan_temiz = temizle_ad(alan).replace("_", "")
-        return q in alan_temiz
-
-    return df[df.apply(satirda_var, axis=1)]
+    return df.loc[df.apply(dosya_mevcut, axis=1)].drop(columns="Tam Yol", errors="ignore")
